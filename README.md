@@ -165,7 +165,7 @@ Generated outreach is intended for human review before use.
 
 Google Sheet (view-only):
 
-[ADD SHARED GOOGLE SHEET LINK]
+[View the EA Job Outreach Dashboard]: https://docs.google.com/spreadsheets/d/1HuyvIww3t2x2ta-_hHnoeIT8t0M2MFtA6XQFL-ikbA0/edit?usp=sharing
 
 An exported copy of the populated spreadsheet is also provided with the final submission.
 
@@ -395,7 +395,7 @@ If credentials are accidentally exposed, revoke or rotate them and remove them f
 
 GitHub repository:
 
-[ADD GITHUB REPOSITORY LINK]
+[View the source code on GitHub](https://github.com/QayZie96/ai-job-outreach-automation)
 
 The repository contains the Python workflow, editable prompts, demonstration profiles, dependency list, and scheduled-execution launcher.
 
