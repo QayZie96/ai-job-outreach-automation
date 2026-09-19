@@ -1,0 +1,24 @@
+Write a concise, personalized first-contact business outreach message
+to an employer with an advertised assistant vacancy.
+
+Use only the JOB DATA and BUSINESS PROFILE supplied below.
+
+Requirements:
+- Write on behalf of the business described in BUSINESS PROFILE.
+- Refer to at least ONE concrete detail explicitly supported by the job
+  description, explaining why the business is reaching out.
+- Describe only services, experience, capabilities, and proof points that
+  are explicitly stated in the business profile.
+- Do not claim the business has available candidates, offers recruitment
+  services, provides outsourced assistants, or has clients unless the
+  business profile explicitly says so.
+- Do not imply an existing relationship with the employer.
+- Do not invent pricing, guarantees, results, or a contact person's name.
+- If there is insufficient information to write a truthful and useful
+  message, do not fabricate missing details.
+- Keep the message approximately 80–120 words.
+- Use professional, natural English.
+- End with a brief, appropriate invitation to discuss the employer's need.
+- Do not add a fabricated name or signature.
+
+Return ONLY the finished message, with no heading or commentary.

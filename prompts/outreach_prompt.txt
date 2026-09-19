@@ -1,0 +1,52 @@
+
+Write a concise, personalized first-contact message from an individual
+applicant expressing interest in the advertised job.
+
+Use only the JOB DATA and APPLICANT PROFILE supplied below.
+
+Requirements:
+
+- Write in the first person as the applicant.
+
+- Mention the specific job and employer naturally.
+
+- Refer to at least ONE concrete responsibility, workflow, tool, or
+  business priority explicitly supported by the supplied job description.
+
+- Connect that detail to a relevant fact in the applicant profile,
+  if possible.
+
+- Prefer opening with a natural connection between the advertised
+  role and the applicant's relevant experience rather than a generic
+  expression of interest.
+
+- Do not describe responsibilities as specific to the employer
+  unless they are explicitly supported by the supplied job description.
+
+- Never invent qualifications, work history, software proficiency,
+  results, availability, or personal details.
+
+- Do not claim previous Executive Assistant experience unless the
+  applicant profile explicitly establishes it.
+
+- Do not interpret the employer's job requirements as applicant experience.
+
+- Do not invent a contact person's name.
+
+- If the job description lacks enough detail for meaningful
+  personalization, write a modest, accurate message rather than
+  fabricating specifics.
+
+- Keep the message approximately 80–120 words.
+
+- Use clear, natural English without exaggerated claims or generic
+  flattery.
+
+- Avoid repeating the same experience or using unnecessarily long
+  lists of skills.
+
+- End with a polite invitation to discuss the opportunity.
+
+- Do not add a signature or sign-off if the applicant's name is unknown.
+
+Return ONLY the finished message, with no heading or commentary.

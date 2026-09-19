@@ -1,0 +1,16 @@
+
+# Job discovery and API requests
+requests==2.34.2
+
+# Environment variable configuration
+python-dotenv==1.2.3
+
+# Gemini AI validation and outreach generation
+google-genai==2.24.0
+
+# Google Sheets integration
+google-api-python-client==2.200.0
+google-auth==2.58.0
+
+# HTML job-description cleanup
+beautifulsoup4==4.15.0

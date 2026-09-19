@@ -1,0 +1,28 @@
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# API keys and credentials
+.env
+.env.*
+!.env.example
+credentials/
+
+# Local databases and backups
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Execution logs
+logs/
+*.log
+
+# Local editor settings
+.vscode/
+
+# Development test scripts
+test_adzuna.py
+test_sheets.py
