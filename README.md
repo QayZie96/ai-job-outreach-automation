@@ -165,7 +165,7 @@ Generated outreach is intended for human review before use.
 
 Google Sheet (view-only):
 
-[View the EA Job Outreach Dashboard]: https://docs.google.com/spreadsheets/d/1HuyvIww3t2x2ta-_hHnoeIT8t0M2MFtA6XQFL-ikbA0/edit?usp=sharing
+[View the EA Job Outreach Dashboard](https://docs.google.com/spreadsheets/d/1HuyvIww3t2x2ta-_hHnoeIT8t0M2MFtA6XQFL-ikbA0/edit?usp=sharing)
 
 An exported copy of the populated spreadsheet is also provided with the final submission.
 
