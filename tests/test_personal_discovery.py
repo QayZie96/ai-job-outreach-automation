@@ -555,6 +555,9 @@ class Tests(unittest.TestCase):
         ranges = [c.kwargs["range"] for c in values.get.call_args_list]
         self.assertIn("'Evaluations'!A1:AA1", ranges)
         self.assertIn("'Run Summary'!A1:N1", ranges)
+        self.assertTrue(any(c.kwargs.get("valueRenderOption") == "FORMULA"
+                            for c in values.get.call_args_list
+                            if c.kwargs["range"].endswith("!A2")))
         self.assertNotIn("'Evaluations'!1:1", ranges)
 
     def test_human_first_sheet_mapping_and_stable_id(self):
