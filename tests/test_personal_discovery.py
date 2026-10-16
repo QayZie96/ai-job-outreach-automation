@@ -513,6 +513,48 @@ class Tests(unittest.TestCase):
         self.assertEqual(row[17:], ["Applied", "Keep manual note"])
         self.assertEqual(row[10], 83)
 
+    def test_sheet_preserves_explicit_manual_geo_exclusion(self):
+        old = [""] * 19
+        old[9] = "ineligible"
+        old[11] = "Ineligible"
+        old[14] = "Posting requires Latin America residence"
+        old[15] = "Human geographic correction"
+        old[17] = "Dismissed"
+        old[18] = "Manual eligibility correction: LATAM-only"
+        row = sheet._row({**JOB, "assessment": ev.classify(dict(VALID), JOB)}, old)
+        self.assertEqual(row[9], "ineligible")
+        self.assertEqual(row[11], "Ineligible")
+        self.assertEqual(row[14], old[14])
+        self.assertEqual(row[15], old[15])
+        self.assertEqual(row[17:19], old[17:19])
+        self.assertEqual(len(row), 19)
+
+    def test_sheet_setup_allows_extra_manual_priority_columns(self):
+        from unittest.mock import MagicMock
+        svc = MagicMock()
+        service_spreadsheets = svc.spreadsheets.return_value
+        service_spreadsheets.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"title": name}} for name in (
+                "Evaluations", "Run Summary", "Strong Matches", "Review Queue"
+            )]
+        }
+        values = service_spreadsheets.values.return_value
+        def return_values(**kwargs):
+            result = MagicMock()
+            if kwargs["range"].startswith("'Evaluations'!"):
+                result.execute.return_value = {"values": [sheet.HEADERS]}
+            elif kwargs["range"].startswith("'Run Summary'!"):
+                result.execute.return_value = {"values": [sheet.RUN_HEADERS]}
+            else:
+                result.execute.return_value = {"values": [["Header"]]}
+            return result
+        values.get.side_effect = return_values
+        sheet._setup(svc, "TEST_SPREADSHEET_ID")
+        ranges = [c.kwargs["range"] for c in values.get.call_args_list]
+        self.assertIn("'Evaluations'!A1:S1", ranges)
+        self.assertIn("'Run Summary'!A1:N1", ranges)
+        self.assertNotIn("'Evaluations'!1:1", ranges)
+
     def test_broader_role_families_reach_manual_review(self):
         for title in ("CRM & Retention Manager", "Marketing Event Manager - EMEA",
                       "Data Analyst", "Remote Office Assistant", "Shopify Specialist",
