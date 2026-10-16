@@ -6,6 +6,10 @@ param([switch]$PreviewOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# Python's SDK occasionally prints harmless AFC warnings on stderr.
+# Windows PowerShell 5.1 can surface redirected native stderr as ErrorRecords;
+# keep it informational and rely on the actual Python exit code.
+$PSDefaultParameterValues["Tee-Object:ErrorAction"] = "Continue"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $root ".venv\Scripts\python.exe"
 $envFile = Join-Path $root ".env"
@@ -32,6 +36,9 @@ $logFolder = Join-Path $root "personal_logs"
 New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $logFile = Join-Path $logFolder ("ray-" + $stamp + ".log")
+# Temporarily avoid treating a nonfatal native stderr warning as a terminating
+# PowerShell error; explicit nonzero exit codes are still checked after each call.
+$ErrorActionPreference = "Continue"
 try {
     # Fail early on a missing/unshared personal Sheet instead of consuming
     # 11 provider requests and Gemini calls before an authentication failure.
@@ -52,6 +59,7 @@ try {
         throw "Gemini reported a failed batch; successful jobs remain saved. Next scheduled run can retry. See $logFile"
     }
 } finally {
+    $ErrorActionPreference = "Stop"
     Get-ChildItem -Path $logFolder -Filter "ray-*.log" -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
         Remove-Item -Force -ErrorAction SilentlyContinue
