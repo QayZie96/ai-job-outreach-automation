@@ -26,9 +26,9 @@ if ($Cadence -eq "Daily") {
 } else {
     # Four daily triggers are more reliable than a Windows repetition duration
     # and cap Remotive at its recommended maximum of four requests per day.
-    $triggers = @(3, 9, 15, 21 | ForEach-Object {
+    $triggers = @(3, 9, 15, 21) | ForEach-Object {
         New-ScheduledTaskTrigger -Daily -At ("{0:D2}:00" -f $_)
-    })
+    }
 }
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -StartWhenAvailable
