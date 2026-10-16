@@ -80,3 +80,25 @@ The original `personal_run.json` stored **only 364** description/title-prefilter
 
 - Replay does **not** contact providers or invoke AI/Sheets. Of the 908 screened URLs in the 16 Oct 2026 v4 sample, 85 had full text and 823 have only 2,500-character audit excerpts. Its output is a conservative, same-inventory comparison, not a completeness or current-opening guarantee.
 - Offline tests: `python -m unittest discover -s tests -p 'test_personal*.py' -v` (tests use local fixtures, no API). For a full run the existing manual `--live --collect-only` command is unchanged and must be separately approved against providers' rolling quotas.
+
+## v4.2 — local seen-state and repeat-judgment suppression
+
+Every URL-deduplicated posting from a manual provider run is now tracked in the Git-ignored `personal_discovery_history.local.json`, including excluded jobs. Its `last_seen` is an observation, not proof a vacancy is active. Missing from the latest fetch means status unknown, never automatically closed.
+
+Backfill all v4 observations without any provider or AI requests:
+
+```powershell
+.\.venv\Scripts\python.exe personal_screening_v41.py --seed-audit personal_run_v4_screening_audit.csv --report personal_run_v4.json
+```
+
+To record an explicit human review decision:
+
+```powershell
+.\.venv\Scripts\python.exe personal_screening_v41.py --mark-url "https://example.com/job/123" --status dismissed
+```
+
+Choose `reviewed`, `dismissed`, `applied` or `pending` (to reopen). The exact URL must already exist in the private history; replace the example URL with the canonical URL from the report.
+
+**Seen is not judged:** Previously discovered but unreviewed opportunities remain in the pending review queue. Successful AI evaluations are automatically marked `ai_judged`. The collector excludes human-reviewed and AI-judged jobs from future pending/AI queues and preserves them in its all-jobs audit. If a judged posting changes, it is flagged as `content_updated_since_review` for manual rechecking without automatically reopening it.
+
+The report includes `new_postings`, `new_candidates`, `pending_for_review`, and `already_judged_skipped`. The screening audit adds `seen_before`, `review_status`, and `ai_judged`. This uses no additional provider requests, no Gemini calls, no Google Sheet writes, no scheduler, and no outreach. Never commit the private history file.
