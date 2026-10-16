@@ -573,5 +573,45 @@ class Tests(unittest.TestCase):
             self.assertIn("restaurant kitchen", row["description_excerpt"])
 
 
+    def test_v41_known_mandatory_languages_are_screened_before_ai(self):
+        spanish = {**JOB, "job_title": "Teaching Assistant: Supply Chain Analyst",
+                   "job_description": ("Supply chain inventory operations and reporting. "
+                                       "Excellent written and spoken English and Spanish language skills."),
+                   "job_url": "https://example.com/spanish"}
+        german = {**JOB, "job_title": "Implementation Consultant",
+                  "job_description": "Manage marketplace processes. German fluency is essential.",
+                  "job_url": "https://example.com/german"}
+        screened, counts, _ = d.screen_candidates([spanish, german])
+        self.assertEqual(screened, [])
+        self.assertEqual(counts["mandatory_language_excluded"], 2)
+
+    def test_v41_large_team_management_and_degree_move_to_manual_review(self):
+        manager = {**JOB, "job_title": "Customer Service Manager (GR)",
+                   "job_description": ("Manage marketplace operations and supplier processes. "
+                                       "A minimum of 7 years' experience in a customer service management role."),
+                   "job_url": "https://example.com/manager"}
+        analyst = {**JOB, "job_title": "Lead Analyst, IT - Business Process Management",
+                   "job_description": ("Bachelor's degree from an accredited university. "
+                                       "7+ years of SAP functional experience and process operations."),
+                   "job_url": "https://example.com/analyst"}
+        screened, _, _ = d.screen_candidates([manager, analyst])
+        self.assertEqual(len(screened), 2)
+        self.assertTrue(all(j["review_only"] for j in screened))
+        self.assertTrue(all(j["fit_flags"] for j in screened))
+
+    def test_v41_annotation_excluded_without_blocking_ai_automation(self):
+        ai_label = {**JOB, "job_title": "Retail Trade & Operations Expert - Remote",
+                    "job_description": ("Help train next-generation AI systems. "
+                                        "Review simulated retail scenarios and improve AI outputs."),
+                    "job_url": "https://example.com/ai-label"}
+        ai_builder = {**JOB, "job_title": "AI Automation Specialist",
+                      "job_description": "Build n8n workflow automation and marketplace systems.",
+                      "job_url": "https://example.com/automation"}
+        kept, counts, _ = d.screen_candidates([ai_label, ai_builder])
+        self.assertEqual(counts["incompatible_role_excluded"], 1)
+        self.assertEqual([j["job_url"] for j in kept], [ai_builder["job_url"]])
+
+
+
 if __name__ == "__main__":
     unittest.main()
