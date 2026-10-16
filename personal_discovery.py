@@ -7,6 +7,7 @@ requires a NEW personal spreadsheet ID distinct from the original RAY ID.
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
@@ -289,8 +290,9 @@ def collect(http):
     return jobs, stats, errors
 
 
-# High-precision, conservative pre-AI screening. Never use company boilerplate
-# alone to qualify a posting, and never infer language proficiency or location.
+# Two-stage screening: preserve plausible operational work for review, then
+# prioritize evidence-rich roles for a bounded Gemini pass. Do NOT treat a
+# deterministic title/description keyword match as a final fit assessment.
 ROLE_TERMS = (
     "ecommerce", "e-commerce", "e commerce", "marketplace", "catalog", "catalogue",
     "merchandis", "product data", "product information", "product content",
@@ -303,9 +305,13 @@ ROLE_TERMS = (
     "implementation", "digital enablement", "business analyst", "business systems",
     "category manager", "supply chain", "omnichannel", "retail trade",
     "seller success", "partner success", "customer operations", "business enablement",
+    "business process", "product operations", "sales support", "commercial support",
+    "client operations", "customer support operations", "retail operations",
+    "logistics coordinator", "project operations", "sales enablement",
 )
-# Roles whose terminology often overlaps with marketplace/operations content, but
-# whose actual day-to-day work is another profession.
+# These are clearly other professions irrespective of company description.
+# Seniority alone is NOT an exclusion: it affects priority, while Gemini/humans
+# verify whether required leadership experience is actually demonstrated.
 OUT_OF_SCOPE_TITLE = re.compile(
     r"\b(?:software|backend|back-end|frontend|front-end|full[ -]?stack|devops|"
     r"site reliability|sre|cloud|platform|infrastructure|machine learning|\bml|"
@@ -316,23 +322,40 @@ OUT_OF_SCOPE_TITLE = re.compile(
     r"video editor|graphic designer|product designer|\bdesigner|"
     r"account executive|account development|sales representative|"
     r"sales development representative|business development representative|"
-    r"account manager|clinical|medical|nurse|lawyer|legal counsel|"
+    r"clinical|medical|nurse|lawyer|legal counsel|"
     r"tax manager|payroll|accountant|underwriter|auditor|accounts payable|finance specialist|"
-    r"chief technology officer|chief operating officer|chief of staff|"
-    r"chief executive|vice president|\bvp\b|director(?: of|,|\b)|head of|"
+    r"chief technology officer|chief operating officer|chief executive|"
     r"intern|internship|werkstudent|working student|stage\b|"
     r"apprentice|praktikum)\b",
     re.IGNORECASE,
 )
 GENERIC_TITLE = re.compile(
     r"\b(?:specialist|analyst|coordinator|associate|project manager|program manager|"
-    r"programme manager|consultant|advisor|manager)\b", re.IGNORECASE
+    r"programme manager|consultant|advisor|manager|lead|officer|administrator|"
+    r"assistant|executive|customer success|customer experience|customer service|"
+    r"customer care|client success|client support|sales support|onboarding|"
+    r"business development|digital transformation)\b", re.IGNORECASE
+)
+ADJACENT_TITLE = (
+    "customer success", "customer service", "customer experience", "customer care",
+    "client success", "client support", "merchant support", "seller support",
+    "partner support", "onboarding", "sales enablement", "digital transformation",
+    "business transformation", "commercial excellence", "operational excellence",
+    "project manager", "program manager", "programme manager", "process manager",
+    "business support", "growth operations", "service delivery", "trade support",
 )
 STRONG_DESCRIPTION_SIGNALS = (
     "ecommerce", "e-commerce", "marketplace", "product data", "product information",
     "catalog", "catalogue", "inventory", "supplier", "vendor", "merchandis",
     "pricing", "fulfillment", "fulfilment", "order management", "procurement",
     "workflow automation", "process automation", "operations management",
+    "seller", "product listing", "order processing", "logistics coordination",
+    "business operations", "process improvement", "supplier coordination",
+)
+OPERATIONAL_ACTIONS = (
+    "manage", "manage and", "optimiz", "improv", "coordinat", "implement",
+    "streamlin", "automat", "develop", "maintain", "monitor", "track",
+    "oversee", "support", "launch", "deliver", "analy", "build",
 )
 NON_ENGLISH_LANGUAGE = (
     "german", "french", "dutch", "spanish", "italian", "portuguese", "polish",
@@ -378,25 +401,36 @@ def description_text(job):
     return " ".join(BeautifulSoup(html.unescape(raw), "html.parser").stripped_strings)[:12000].lower()
 
 
-def title_relevance(job):
+def role_evidence(job):
+    """Return (relevance points, auditable reason), never a fit/eligibility verdict."""
     title = " ".join(str(job.get("job_title") or "").lower().split())
-    if not title or OUT_OF_SCOPE_TITLE.search(title):
-        return 0
+    if not title:
+        return 0, "missing title"
+    if OUT_OF_SCOPE_TITLE.search(title):
+        return 0, "clear non-target profession/title"
     if _has_any(title, ("people operations", "hr operations", "human resources", "data center")):
-        return 0
-    matched = [t for t in ROLE_TERMS if _has_phrase(title, t)]
+        return 0, "unrelated operations domain"
+    matched = [term for term in ROLE_TERMS if _has_phrase(title, term)]
     if matched:
         major = ("ecommerce", "e-commerce", "e commerce", "marketplace", "catalog",
                  "catalogue", "product data", "product information", "pricing", "inventory")
-        return 78 if _has_any(title, major) else 65
-    # A generic title needs specific domain signals, not incidental words
-    # such as "operations" or "product" in employer descriptions.
-    if GENERIC_TITLE.search(title):
-        desc = description_text(job)
-        signals = {term for term in STRONG_DESCRIPTION_SIGNALS if _has_phrase(desc, term)}
-        if len(signals) >= 3:
-            return 28
-    return 0
+        return (78 if _has_any(title, major) else 65), "target role in job title"
+    # Adjacent titles need content corroboration. We preserve plausible roles
+    # for review rather than requiring the exact words 'operations' or 'catalog'.
+    desc = description_text(job)
+    signals = {term for term in STRONG_DESCRIPTION_SIGNALS if _has_phrase(desc, term)}
+    if _has_any(title, ADJACENT_TITLE) and len(signals) >= 2:
+        return 45, "adjacent role with operational domain evidence"
+    if GENERIC_TITLE.search(title) and len(signals) >= 3 and any(
+            stem in desc for stem in OPERATIONAL_ACTIONS):
+        return 27, "generic role with multiple operational domain signals"
+    if _has_any(title, ADJACENT_TITLE):
+        return 18, "adjacent title; insufficient domain evidence (manual review only)"
+    return 0, "insufficient operational role evidence"
+
+
+def title_relevance(job):
+    return role_evidence(job)[0]
 
 
 def target_role(job):
@@ -416,9 +450,36 @@ def mandatory_other_language(job):
             rf"\b(?:must|need|required)\s+(?:to\s+)?(?:speak|write|understand)\s+{l}\b",
             rf"\b(?:c1|c2)\s+(?:level\s+)?{l}\b",
         )
-        if any(re.search(p, desc) for p in patterns) or re.search(
+        # Treat explicitly optional/preferred language as non-mandatory.
+        # Assess the local clause, not a boilerplate preference elsewhere.
+        found_required = False
+        for pattern in patterns:
+            for match in re.finditer(pattern, desc):
+                tail = desc[match.end():match.end() + 65].split(".")[0].split(";")[0]
+                optional = re.search(r"\b(?:preferred|optional|a plus|nice to have|bonus|"
+                                     r"not required|desirable|advantage)\b", tail)
+                required = re.search(r"\b(?:required|mandatory|must|essential)\b", tail)
+                if not optional or (required and not re.search(r"\bnot required\b", tail)):
+                    found_required = True
+                    break
+            if found_required:
+                break
+        if found_required or re.search(
                 rf"\b{l}\s+(?:fluency|required|speaking)\b|\bfluent\s+(?:in\s+)?{l}\b|"
                 rf"\b{l}[ -]speaking\b", title):
+            return language
+    # Country-language spellings and typical requirement constructions that
+    # English-only word detection misses, e.g. Dutch "Je spreekt vloeiend
+    # Nederlands en Engels". Positive requirements only, not "nice to have".
+    native_patterns = (
+        ("Dutch", r"\b(?:je\s+spreekt|spreek|beheers|spreekt)\s+(?:vloeiend|uitstekend|goed)\s+nederlands\b|"
+                  r"\b(?:vloeiend|uitstekend)\s+nederlands\b|"
+                  r"\b(?:goede|uitstekende)\s+beheersing\s+van\s+(?:de\s+)?nederlandse\s+taal\b"),
+        ("German", r"\b(?:du\s+sprichst|sie\s+sprechen)\s+(?:fließend|fliessend|sehr gut)\s+deutsch\b"),
+        ("French", r"\b(?:français\s+courant|maîtrise\s+du\s+français|parlez\s+couramment\s+français)\b"),
+    )
+    for language, pattern in native_patterns:
+        if re.search(pattern, desc):
             return language
     # Explicit mandatory proficiency in German found in local-language postings.
     if re.search(
@@ -491,6 +552,8 @@ def candidate_priority(job):
         score -= 9
     if "lead" in title:
         score -= 7
+    if re.search(r"\b(?:director|head of|vice president|vp|chief of staff)\b", title):
+        score -= 28  # keep visible in review; typically unlikely at this experience level
     desc = description_text(job)
     if re.search(r"\b(?:8\+|10\+|12\+)\s+years?\b", desc):
         score -= 10
@@ -529,25 +592,75 @@ def prioritize_candidates(jobs, limit=40):
     return selected
 
 
-def screen_candidates(jobs):
+def screen_candidates(jobs, audit=None):
+    """Broad but accountable screen. Audit one decision for EVERY unique job."""
     survivors, counts, rejects = [], Counter(), Counter()
     for job in jobs:
-        if not target_role(job):
+        role_score, role_reason = role_evidence(job)
+        status, reason = preliminary_eligibility(job) if role_score else ("not_checked", "role excluded before eligibility check")
+        senior_executive = bool(re.search(r"\b(?:director|head of|vice president|vp|chief of staff)\b",
+                                          str(job.get("job_title") or ""), re.IGNORECASE))
+        exploratory = bool(role_score and (role_score < 45 or senior_executive))
+        outcome = "review_only" if exploratory else "candidate"
+        if not role_score:
             counts["role_out_of_scope"] += 1
-            continue
-        status, reason = preliminary_eligibility(job)
-        if status == "ineligible":
+            outcome = "role_out_of_scope"
+        elif status == "ineligible":
             key = "mandatory_language" if reason.startswith("Mandatory") else "geography"
             counts[key + "_excluded"] += 1
             rejects[(job.get("source", ""), key)] += 1
-            continue
-        job["precheck_eligibility"] = status
-        job["precheck_reason"] = reason
-        job["priority"] = candidate_priority(job)
-        survivors.append(job)
-        counts["eligible" if status == "eligible" else "uncertain"] += 1
+            outcome = key + "_excluded"
+        else:
+            job["precheck_eligibility"] = status
+            job["precheck_reason"] = reason
+            job["role_evidence_reason"] = role_reason
+            job["review_only"] = exploratory
+            job["priority"] = candidate_priority(job)
+            survivors.append(job)
+            counts["eligible" if status == "eligible" else "uncertain"] += 1
+            if exploratory:
+                counts["review_only"] += 1
+        if audit is not None:
+            audit.append({
+                "source": job.get("source", ""),
+                "company": job.get("company_name", ""),
+                "job_title": job.get("job_title", ""),
+                "location": job.get("location", ""),
+                "remote": job.get("remote"),
+                "job_url": job.get("job_url", ""),
+                "role_score": role_score,
+                "role_reason": role_reason,
+                "eligibility": status,
+                "eligibility_reason": reason,
+                "screen_outcome": outcome,
+                "priority": job.get("priority", "") if outcome in ("candidate", "review_only") else "",
+                "ai_selected": False,
+            })
     return survivors, dict(counts), {f"{source}:{reason}": count
-                                      for (source, reason), count in sorted(rejects.items())}
+                                       for (source, reason), count in sorted(rejects.items())}
+
+
+def write_screening_audit(report_path, audit):
+    """Save a compact offline review of ALL unique jobs, not just survivors."""
+    dest = Path(report_path).with_name(Path(report_path).stem + "_screening_audit.csv")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fields = ("source", "company", "job_title", "location", "remote", "job_url",
+              "role_score", "role_reason", "eligibility", "eligibility_reason",
+              "screen_outcome", "priority", "ai_selected")
+    with dest.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        for row in audit:
+            # Excel interprets leading =,+,-,@ (also when whitespace-prefixed)
+            # as formulas. Job-board titles/URLs are untrusted strings.
+            safe = {}
+            for key, value in row.items():
+                if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+                    safe[key] = "'" + value
+                else:
+                    safe[key] = value
+            writer.writerow(safe)
+    return dest
 
 
 def deduplicate(jobs):
@@ -601,17 +714,26 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     http = BudgetedHTTP(limits, session)
     raw, stats, errors = collect(http)
     unique = deduplicate(raw)
-    candidates, screen_stats, rejection_by_source = screen_candidates(unique)
+    audit = []
+    candidates, screen_stats, rejection_by_source = screen_candidates(unique, audit=audit)
     selection_limit = env_int("PERSONAL_MAX_AI_CANDIDATES", 40, minimum=1, maximum=100)
-    shortlist = prioritize_candidates(candidates, selection_limit)
+    scoring_pool = [job for job in candidates if not job.get("review_only")]
+    shortlist = prioritize_candidates(scoring_pool, selection_limit)
+    chosen_urls = {j["job_url"] for j in shortlist}
+    for row in audit:
+        row["ai_selected"] = row["job_url"] in chosen_urls
+    audit_file = write_screening_audit(report_path, audit)
     candidates.sort(key=lambda j: (-j["priority"], j.get("source", ""),
                                    j.get("job_url", "")))
     eval_stats = {"unique": len(unique), "prefiltered_candidates": len(candidates),
                   "precheck": screen_stats, "rejections_by_source": rejection_by_source,
                   "ai_shortlist_count": len(shortlist), "ai_shortlist_limit": selection_limit,
-                  "deferred_by_selection_limit": len(candidates) - len(shortlist),
+                  "exploratory_review_only": len(candidates) - len(scoring_pool),
+                  "deferred_by_selection_limit": len(scoring_pool) - len(shortlist),
                   "shortlist_by_source": dict(Counter(j["source"] for j in shortlist)),
-                  "shortlist_urls": [j["job_url"] for j in shortlist]}
+                  "shortlist_urls": [j["job_url"] for j in shortlist],
+                  "screening_audit_file": str(audit_file),
+                  "audit_rows": len(audit)}
     if collect_only:
         completed = candidates  # preserve reviewable complete pre-AI candidate pool
     else:
@@ -624,7 +746,7 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     print(f"Personal run complete: {len(raw)} fetched, {len(unique)} unique, "
           f"{len(candidates)} screened candidates, {len(shortlist)} AI shortlist, "
           f"{len(completed)} evaluated/collected. "
-          f"Calls: {dict(http.calls)}. Report: {path}")
+          f"Calls: {dict(http.calls)}. Report: {path}. Audit: {audit_file}")
     return completed, eval_stats
 
 

@@ -321,7 +321,7 @@ class Tests(unittest.TestCase):
         for title in ("Staff Product Engineer", "Senior DevOps Engineer",
                       "Enterprise Account Executive - DACH", "Chief Technology Officer",
                       "Head of Product Compliance", "Senior Accounts Payable Coordinator",
-                      "Director, Global Operations Excellence", "Teamlead People Operations"):
+                      "Teamlead People Operations"):
             with self.subTest(title=title):
                 self.assertFalse(d.target_role({**noise, "job_title": title}))
         for title in ("Digital Enablement Specialist", "Marketplace Manager",
@@ -398,6 +398,93 @@ class Tests(unittest.TestCase):
         self.assertLessEqual(counts["Arbeitnow"], 8)
         self.assertGreater(counts["Himalayas"], 0)
         self.assertGreater(counts["Jobicy"], 0)
+
+    def test_balanced_screen_retains_customer_ops_for_review(self):
+        job = {**JOB, "job_title": "Customer Service Manager (GR)",
+               "job_description": "Improve marketplace processes, order management and inventory coordination; manage vendor escalations.",
+               "location": "Greece"}
+        self.assertGreaterEqual(d.title_relevance(job), 45)
+        audit = []
+        survivors, counts, rejects = d.screen_candidates([job], audit=audit)
+        self.assertEqual(len(survivors), 1)
+        self.assertEqual(audit[0]["screen_outcome"], "candidate")
+        self.assertEqual(audit[0]["eligibility"], "eligible")
+        self.assertFalse(survivors[0]["review_only"])
+
+    def test_exploratory_lane_does_not_consume_ai_calls(self):
+        strong = {**JOB, "job_title": "Marketplace Operations Coordinator",
+                  "job_url": "https://example.com/job/strong"}
+        adjacent = {**JOB, "job_title": "Customer Success Manager",
+                    "job_description": "Engage customers.",
+                    "job_url": "https://example.com/job/explore"}
+        executive = {**JOB, "job_title": "Director of Operations",
+                     "job_url": "https://example.com/job/director"}
+        audit = []
+        pool, counts, rejects = d.screen_candidates([strong, adjacent, executive], audit)
+        self.assertEqual(len(pool), 3)
+        self.assertEqual(counts["review_only"], 2)
+        self.assertEqual({j["job_url"] for j in pool if not j["review_only"]},
+                         {strong["job_url"]})
+        self.assertEqual([r["screen_outcome"] for r in audit],
+                         ["candidate", "review_only", "review_only"])
+
+    def test_dutch_requirement_is_detected_but_optional_german_is_not(self):
+        dutch = {**JOB, "job_title": "Manager Operations Planning & Performance",
+                 "job_description": "Je spreekt vloeiend Nederlands en Engels."}
+        self.assertEqual(d.mandatory_other_language(dutch), "Dutch")
+        self.assertEqual(d.preliminary_eligibility(dutch)[0], "ineligible")
+        optional = {**JOB, "job_description": "Fluent German is preferred, not required. English is required."}
+        self.assertIsNone(d.mandatory_other_language(optional))
+
+    def test_screening_audit_records_all_sources_and_exclusions(self):
+        rows = [
+            {**JOB, "job_url": "https://site/j/1", "job_title": "Marketplace Operations Manager"},
+            {**JOB, "job_url": "https://site/j/2", "job_title": "Senior Software Engineer",
+             "job_description": "Our ecommerce marketplace needs operations."},
+            {**JOB, "job_url": "https://site/j/3", "job_title": "Pricing Specialist",
+             "location": "USA"},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            audit = []
+            pool, counts, rejects = d.screen_candidates(rows, audit)
+            self.assertEqual(len(pool), 1)
+            dest = d.write_screening_audit(Path(td) / "personal_run.json", audit)
+            self.assertTrue(dest.exists())
+            import csv
+            with dest.open(encoding="utf-8-sig", newline="") as handle:
+                records = list(csv.DictReader(handle))
+            self.assertEqual(len(records), len(rows))
+            self.assertEqual([r["screen_outcome"] for r in records],
+                             ["candidate", "role_out_of_scope", "geography_excluded"])
+            self.assertEqual(records[1]["role_reason"], "clear non-target profession/title")
+
+    def test_screening_audit_escapes_untrusted_spreadsheet_formulas(self):
+        with tempfile.TemporaryDirectory() as td:
+            record = {"job_title": '=HYPERLINK("https://bad.test", "click")',
+                      "company": "+EXECUTE()", "job_url": "https://example.com/test"}
+            dest = d.write_screening_audit(Path(td) / "personal_run.json", [record])
+            import csv
+            with dest.open(encoding="utf-8-sig", newline="") as handle:
+                row = list(csv.DictReader(handle))[0]
+            self.assertTrue(row["job_title"].startswith("'="))
+            self.assertTrue(row["company"].startswith("'+"))
+            self.assertEqual(row["job_url"], "https://example.com/test")
+
+    def test_collection_only_produces_audit_no_remote_ai_or_sheets(self):
+        fake_jobs = [{**JOB, "job_url": "https://example.com/j/4"},
+                     {**JOB, "job_url": "https://example.com/j/5", "source_job_id": "55",
+                      "job_title": "Staff Software Engineer"}]
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "personal_run.json"
+            with patch.dict("os.environ", {"GEMINI_API_KEY": "",
+                  "PERSONAL_MAX_ARBEITNOW_CALLS": "0", "PERSONAL_MAX_REMOTIVE_CALLS": "0",
+                  "PERSONAL_MAX_HIMALAYAS_CALLS": "0", "PERSONAL_MAX_JOBICY_CALLS": "0"}):
+                with patch.object(d, "collect", return_value=(fake_jobs, {"Jobicy": 2}, [])):
+                    jobs, stats = d.run(collect_only=True, report_path=str(report))
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(stats["audit_rows"], 2)
+            self.assertEqual(stats["ai_shortlist_count"], 1)
+            self.assertTrue((Path(td) / "personal_run_screening_audit.csv").is_file())
 
     def test_normalized_legacy_dates_not_unix_timestamps(self):
         row = d.normalize_original("Arbeitnow", [{"title": "Operations Manager",
