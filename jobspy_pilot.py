@@ -176,8 +176,12 @@ def possible_crossboard_duplicates(jobs):
                clean_token(job.get("location")))
         if all(key):
             by_signature[key].append(job)
+    by_employer_url = defaultdict(list)
+    for job in jobs:
+        if job.get("employer_url"):
+            by_employer_url[job["employer_url"]].append(job)
     duplicate_urls = set()
-    for members in by_signature.values():
+    for members in list(by_signature.values()) + list(by_employer_url.values()):
         if len({j["underlying_board"] for j in members}) > 1:
             duplicate_urls.update(j["job_url"] for j in members)
     return duplicate_urls
@@ -344,7 +348,8 @@ def main(args):
          "Previously Seen in JobSpy": details[j["job_url"]]["seen_before"],
          "Known in RAY": details[j["job_url"]]["known_in_ray"],
          "Possible Cross-board Duplicate": details[j["job_url"]]["possible_duplicate"],
-        } for j in candidates], HEADERS)
+         "Possible Existing RAY Match": details[j["job_url"]]["possible_ray_match"],
+        } for j in candidates], (*HEADERS, "Possible Existing RAY Match"))
     save_csv(STATE / "jobspy_screening_audit.csv", audit,
              tuple(dict.fromkeys(k for row in audit for k in row)))
     (STATE / "jobspy_raw.json").write_text(
