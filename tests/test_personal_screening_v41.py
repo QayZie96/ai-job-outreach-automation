@@ -90,5 +90,42 @@ class V41Tests(unittest.TestCase):
             self.assertEqual(results['new']['mandatory_language_excluded'],1)
 
 
+    def test_manual_decision_survives_repeat_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "history.local.json"
+            job = {"job_url": "https://example.com/roles/100", "job_title": "Catalog Analyst",
+                   "job_description": "Clean marketplace catalogs.", "source": "Jobicy"}
+            cal.update_history(p, [job], "2026-10-16T12:00:00Z")
+            self.assertTrue(cal.pending_for_review(cal.load_history(p), job))
+            cal.mark_review(p, job["job_url"], "applied")
+            job["job_description"] = "Now manage marketplace catalogs and datasets."
+            cal.update_history(p, [job], "2026-10-17T12:00:00Z")
+            saved = cal.load_history(p)[job["job_url"]]
+            self.assertEqual(saved["review_status"], "applied")
+            self.assertEqual(saved["first_seen"], "2026-10-16T12:00:00Z")
+            self.assertTrue(saved["content_updated_since_review"])
+            self.assertFalse(cal.pending_for_review(cal.load_history(p), job))
+            cal.mark_review(p, job["job_url"], "pending")
+            self.assertTrue(cal.pending_for_review(cal.load_history(p), job))
+
+    def test_ai_judged_is_not_resent_and_absence_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "history.local.json"
+            job = {"job_url": "https://example.com/roles/101", "job_title": "AI Automation"}
+            cal.update_history(p, [job], evaluated_urls=[job["job_url"]])
+            self.assertFalse(cal.pending_for_review(cal.load_history(p), job))
+            cal.update_history(p, [])
+            saved = cal.load_history(p)[job["job_url"]]
+            self.assertEqual(saved["status"], "not_seen_in_latest_run_status_unknown")
+            self.assertTrue(saved["ai_judged"])
+            self.assertFalse(cal.pending_for_review(cal.load_history(p), job))
+
+    def test_fingerprint_consistent_between_full_and_excerpt(self):
+        full = {"job_title": "Project Coordinator", "job_description": "X" * 3000}
+        excerpt = {"job_title": "Project Coordinator", "description_excerpt": "X" * 2500}
+        self.assertEqual(cal._posting_fingerprint(full), cal._posting_fingerprint(excerpt))
+
+
+
 if __name__ == '__main__':
     unittest.main()
