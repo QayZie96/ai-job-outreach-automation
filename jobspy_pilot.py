@@ -80,7 +80,7 @@ def normalize(row, *, query="fixture"):
     if board not in {"indeed", "linkedin"}:
         return None
     url = canonical_url(row.get("job_url"))
-    if not url:
+    if not url or not text_value(row.get("title")) or not text_value(row.get("company")):
         return None
     place = ", ".join(dict.fromkeys(
         x for x in (text_value(row.get("city")), text_value(row.get("state")),
@@ -269,6 +269,8 @@ def evaluate(jobs):
 def main(args):
     if bool(args.live) == bool(args.fixture):
         raise ValueError("Choose exactly one of --live or --fixture")
+    if args.fixture and (args.sheet or args.evaluate):
+        raise ValueError("Fixture runs must not publish or call Gemini")
     if args.sheet:
         eligible_sheet()  # refuse invalid destination before a scrape or AI call
     if args.evaluate and os.getenv("PERSONAL_GEMINI_FREE_TIER_CONFIRMED") != "YES":
@@ -289,7 +291,8 @@ def main(args):
     unique = deduplicate(normalized)
     audit = []
     candidates, screen_counts, rejected = screen_candidates(unique, audit=audit)
-    own_history_file = STATE / "jobspy_discovery_history.local.json"
+    own_history_file = STATE / ("jobspy_fixture_history.local.json" if args.fixture
+                                else "jobspy_discovery_history.local.json")
     own_before = load_history(own_history_file)
     ray_history = load_history(args.baseline_history) if args.baseline_history else {}
     known = {canonical_url(url) for url in ray_history}
@@ -308,7 +311,7 @@ def main(args):
     pending = [j for j in candidates if pending_for_review(own_before, j)]
     completed, ai_stats = ([], {})
     if args.evaluate:
-        completed, ai_stats = evaluate(pending)
+        completed, ai_stats = evaluate([j for j in pending if not details[j["job_url"]]["known_in_ray"]])
     written = {}
     if args.sheet:
         written = publish_pilot(candidates, details)
