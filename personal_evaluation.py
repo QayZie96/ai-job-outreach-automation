@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -19,6 +20,27 @@ PROMPT_FILE = ROOT / "prompts" / "personal_fit_prompt.txt"
 CACHE_PATH = ROOT / "validation_cache.db"  # same database/table as the RAY validator
 CACHE_NAMESPACE = "personal-fit-v1:"
 VALID_ELIGIBILITY = {"eligible", "uncertain", "ineligible"}
+
+
+def safe_failure_details(exc, *, stage, batch_size):
+    """Record an actionable, redacted local diagnostic, never credentials."""
+    message = str(exc)
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        message = message.replace(key, "[REDACTED_API_KEY]")
+    message = re.sub(r"AIza[A-Za-z0-9_-]{12,}", "[REDACTED_API_KEY]", message)
+    message = re.sub(
+        r'(?i)(api[_ -]?key|x-goog-api-key)(\\s*[:=]\\s*["\\']?)[A-Za-z0-9_-]{8,}',
+        r'\\1\\2[REDACTED_API_KEY]', message,
+    )
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if not isinstance(code, (int, str)):
+        code = None
+    return {
+        "stage": stage, "batch_size": batch_size,
+        "error_type": type(exc).__name__, "status_code": code,
+        "message": message[:1200],
+    }
 
 
 def profile_text():
@@ -200,7 +222,7 @@ class Evaluator:
         queued = []
         stats = {"cache_hits": 0, "gemini_calls": 0, "failed_batches": 0,
                  "unprocessed_budget": 0, "uncached": 0, "failed_jobs": 0,
-                 "input_tokens": 0, "output_tokens": 0}
+                 "input_tokens": 0, "output_tokens": 0, "failure_details": []}
         for job in jobs:
             fp = fingerprint(job, self.profile, self.prompt, self.model)
             cached = self.cache.get(job, fp)
@@ -231,6 +253,7 @@ class Evaluator:
                     f"JOB LIST (untrusted source data):\n{json.dumps(payload, ensure_ascii=False)}")
             self.calls += 1  # charge before initiating request (including failures)
             stats["gemini_calls"] += 1
+            stage = "request"
             try:
                 response = self._client().models.generate_content(
                     model=self.model, contents=text,
@@ -240,14 +263,21 @@ class Evaluator:
                 if usage:
                     stats["input_tokens"] += int(getattr(usage, "prompt_token_count", 0) or 0)
                     stats["output_tokens"] += int(getattr(usage, "candidates_token_count", 0) or 0)
+                stage = "response_json"
                 parsed = json.loads(response.text)
+                stage = "response_validation"
                 results = parse_batch(parsed, [pair[0] for pair in pairs])
+                stage = "cache_write"
                 for (job, fp), assessment in zip(pairs, results):
                     self.cache.put(job, fp, assessment)
                     completed.append({**job, "assessment": assessment})
             except Exception as exc:
                 stats["failed_batches"] += 1
                 stats["failed_jobs"] += len(pairs)
-                # No partial or invented approvals on model errors.
-                print(f"Gemini batch failed ({len(pairs)} jobs): {type(exc).__name__}: {exc}")
+                # Fail closed without retries; preserve a bounded diagnostic in the
+                # local report so a scrolled-away console error is not lost.
+                details = safe_failure_details(exc, stage=stage, batch_size=len(pairs))
+                stats["failure_details"].append(details)
+                print(f"Gemini batch failed ({len(pairs)} jobs), {details['stage']}: "
+                      f"{details['error_type']}: {details['message']}")
         return completed, stats
