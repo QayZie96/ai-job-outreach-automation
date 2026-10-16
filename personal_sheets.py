@@ -48,7 +48,11 @@ def _setup(service, spreadsheet_id):
                                body={"requests": additions}).execute()
     values = sheets_api.values()
     for tab, header in (("Evaluations", HEADERS), ("Run Summary", RUN_HEADERS)):
-        response = values.get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!1:1").execute()
+        # The operational master has manual-priority columns T:Z. Validate
+        # only the managed A:S/A:N headers rather than rejecting those extras.
+        last = "S" if tab == "Evaluations" else "N"
+        response = values.get(spreadsheetId=spreadsheet_id,
+                              range=f"'{tab}'!A1:{last}1").execute()
         rows = response.get("values", [])
         if rows and rows[0] != header:
             raise ValueError(f"{tab} has unexpected header; refusing write")
@@ -70,16 +74,27 @@ def _row(job, existing=None):
     assessment = job["assessment"]
     old = list(existing or [])
     old += [""] * max(0, len(HEADERS) - len(old))
+    # Preserve an explicit human-approved geographic exclusion after subsequent
+    # AI/Sheet syncs; the original Gemini cached judgment may still say Review.
+    manual_geo_exclusion = (
+        str(old[18]).startswith("Manual eligibility correction:")
+        and str(old[9]).lower() == "ineligible"
+        and old[11] == "Ineligible"
+    )
     return [
         job.get("job_title", ""), job.get("company_name", ""), job.get("location", ""),
         ("Hybrid / EU relocation" if "office-based/hybrid" in job.get("precheck_reason", "")
          else "Remote" if job.get("remote") else "On-site / hybrid / unspecified"),
         job.get("source", ""), job.get("source_job_id", ""), job.get("job_url", ""),
         job.get("created_at", ""), datetime.now(timezone.utc).date().isoformat(),
-        assessment["eligibility"], assessment["fit_score"] if assessment["fit_score"] is not None else "",
-        assessment["decision"], "; ".join(assessment["matched_evidence"]),
-        "; ".join(assessment["mandatory_requirements"]), assessment["main_gap_or_uncertainty"],
-        assessment["reason"], job.get("salary", ""), old[17] or "New", old[18],
+        ("ineligible" if manual_geo_exclusion else assessment["eligibility"]),
+        assessment["fit_score"] if assessment["fit_score"] is not None else "",
+        ("Ineligible" if manual_geo_exclusion else assessment["decision"]),
+        "; ".join(assessment["matched_evidence"]),
+        "; ".join(assessment["mandatory_requirements"]),
+        (old[14] if manual_geo_exclusion else assessment["main_gap_or_uncertainty"]),
+        (old[15] if manual_geo_exclusion else assessment["reason"]),
+        job.get("salary", ""), old[17] or "New", old[18],
     ]
 
 
