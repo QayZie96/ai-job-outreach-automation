@@ -62,7 +62,7 @@ def _setup(service, spreadsheet_id):
     sheets_api = service.spreadsheets()
     metadata = sheets_api.get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title").execute()
     existing = {s["properties"]["title"] for s in metadata.get("sheets", [])}
-    required = ["Evaluations", "Run Summary", "Apply First", *VIEWS]
+    required = ["Evaluations", "Run Summary", "Apply First", "Pending AI", *VIEWS]
     additions = [{"addSheet": {"properties": {"title": title}}}
                  for title in required if title not in existing]
     if additions:
@@ -82,7 +82,8 @@ def _setup(service, spreadsheet_id):
     # Existing live views have headers on row 1 and formulas in A2.
     # Never overwrite user-edited formulas or replace the original RAY Sheet.
     for tab, formula in VIEW_FORMULAS.items():
-        first = values.get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2").execute().get("values", [])
+        first = values.get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2",
+                           valueRenderOption="FORMULA").execute().get("values", [])
         if first and first[0] and first[0][0] != formula:
             raise ValueError(f"{tab} has an unexpected formula in A2; refusing write")
         if not first:
@@ -180,6 +181,24 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
         values.append(spreadsheetId=spreadsheet_id, range="'Evaluations'!A:AA",
                       valueInputOption="RAW", insertDataOption="INSERT_ROWS",
                       body={"values": pending_add}).execute()
+    # The five pilot jobs remain in Pending AI until successfully assessed.
+    # Update the status, not the source posting details or user's history.
+    scored_urls = {str(job.get("job_url") or "") for job in jobs if "assessment" in job}
+    pending = values.get(spreadsheetId=spreadsheet_id,
+                         range="'Pending AI'!A2:F").execute().get("values", [])
+    completed_pending = []
+    for row_idx, old_row in enumerate(pending, start=2):
+        if len(old_row) > 3 and old_row[3] in scored_urls:
+            old_status = old_row[4] if len(old_row) > 4 else ""
+            if old_status.startswith("Not scored"):
+                completed_pending.append({
+                    "range": f"'Pending AI'!E{row_idx}:F{row_idx}",
+                    "values": [["Scored", "See Evaluations by Vacancy URL"]],
+                })
+    if completed_pending:
+        values.batchUpdate(spreadsheetId=spreadsheet_id,
+                           body={"valueInputOption": "RAW",
+                                 "data": completed_pending}).execute()
     decisions = Counter(j["assessment"]["decision"] for j in jobs if "assessment" in j)
     source_names = sorted(set(provider_stats) | set(http_calls))
     now = datetime.now(timezone.utc).isoformat()
