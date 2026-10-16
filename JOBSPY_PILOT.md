@@ -14,7 +14,7 @@ cd ..\ray-personal-jobspy
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-jobspy.txt
 Copy-Item .env.jobspy.example .env.jobspy
-.\.venv\Scripts\python.exe -m unittest tests.test_jobspy_pilot -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_jobspy_pilot.py -v
 .\.venv\Scripts\python.exe jobspy_pilot.py --fixture tests\fixtures\jobspy_sample.json
 ```
 
@@ -35,7 +35,8 @@ proxies, authentication, or anti-bot workarounds. Stop a platform after its firs
 failed invocation. Actual underlying HTTP request counts are not exposed by JobSpy:
 `collection_invocations_not_http_count` counts **library calls**, not HTTP requests.
 
-Results stay under ignored `jobspy_state/`:
+Fixture results have a separate local history and cannot publish to Sheets or call Gemini.
+Live results stay under ignored `jobspy_state/`:
 - `jobspy_raw.json`, `jobspy_normalized.json`
 - `jobspy_candidates.csv`, `jobspy_screening_audit.csv`
 - `jobspy_report.json`, and a **separate** local history file.
@@ -53,7 +54,9 @@ This writes **only** to [Personal Ray — JobSpy Pilot](https://docs.google.com/
 
 The new blank Sheet is prepared with a `Pilot Leads` tab.
 When you are ready for publication, separately grant your existing RAY
-Google service-account email **Editor** access to the pilot sheet, then copy
+Google service-account email
+`ea-job-outreach-writer@ea-job-outreach-automation.iam.gserviceaccount.com`
+**Editor** access to the pilot sheet, then copy
 the existing service-account JSON securely into this separate checkout at
 `credentials/google-service-account.json`.
 Do not commit credentials. **Do not share or write to the production Personal Ray Sheet.**
