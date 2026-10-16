@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from personal_evaluation import Evaluator, PersonalCache, profile_text
-from personal_screening_v41 import calibrated_factors, update_history
+from personal_screening_v41 import calibrated_factors, update_history, load_history, pending_for_review
 
 BASE = Path(__file__).resolve().parent
 ARBEITNOW = "https://www.arbeitnow.com/api/job-board-api"
@@ -737,7 +737,7 @@ def write_screening_audit(report_path, audit):
     fields = ("source", "company", "job_title", "location", "remote", "job_url",
               "source_query", "description_excerpt",
               "role_score", "role_reason", "fit_flags", "eligibility", "eligibility_reason",
-              "screen_outcome", "priority", "ai_selected")
+              "screen_outcome", "priority", "ai_selected", "seen_before", "review_status", "ai_judged")
     with dest.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
@@ -807,12 +807,25 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     unique = deduplicate(raw)
     audit = []
     candidates, screen_stats, rejection_by_source = screen_candidates(unique, audit=audit)
+    history_file = Path(report_path).with_name("personal_discovery_history.local.json")
+    history_before = load_history(history_file)
+    for job in candidates:
+        old = history_before.get(job["job_url"], {})
+        job["discovery_status"] = "previously_seen" if old else "new"
+        job["review_status"] = old.get("review_status", "pending")
+        job["ai_judged"] = bool(old.get("ai_judged", False))
+    pending_candidates = [job for job in candidates
+                          if pending_for_review(history_before, job)]
     selection_limit = env_int("PERSONAL_MAX_AI_CANDIDATES", 40, minimum=1, maximum=100)
-    scoring_pool = [job for job in candidates if not job.get("review_only")]
+    scoring_pool = [job for job in pending_candidates if not job.get("review_only")]
     shortlist = prioritize_candidates(scoring_pool, selection_limit)
     chosen_urls = {j["job_url"] for j in shortlist}
     for row in audit:
+        old = history_before.get(row["job_url"], {})
         row["ai_selected"] = row["job_url"] in chosen_urls
+        row["seen_before"] = bool(old)
+        row["review_status"] = old.get("review_status", "pending")
+        row["ai_judged"] = bool(old.get("ai_judged", False))
     audit_file = write_screening_audit(report_path, audit)
     candidates.sort(key=lambda j: (-j["priority"], j.get("source", ""),
                                    j.get("job_url", "")))
@@ -824,7 +837,11 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
                   "unique": len(unique), "prefiltered_candidates": len(candidates),
                   "precheck": screen_stats, "rejections_by_source": rejection_by_source,
                   "ai_shortlist_count": len(shortlist), "ai_shortlist_limit": selection_limit,
-                  "exploratory_review_only": len(candidates) - len(scoring_pool),
+                  "exploratory_review_only": len(pending_candidates) - len(scoring_pool),
+                  "pending_for_review": len(pending_candidates),
+                  "already_judged_skipped": len(candidates) - len(pending_candidates),
+                  "new_candidates": sum(j["discovery_status"] == "new" for j in pending_candidates),
+                  "new_postings": sum(row["seen_before"] is False for row in audit),
                   "deferred_by_selection_limit": len(scoring_pool) - len(shortlist),
                   "shortlist_by_source": dict(Counter(j["source"] for j in shortlist)),
                   "shortlist_urls": [j["job_url"] for j in shortlist],
@@ -832,13 +849,13 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
                   "audit_rows": len(audit),
                   "manual_review_urls": [j["job_url"] for j in candidates if j.get("review_only")]}
     if collect_only:
-        completed = candidates  # preserve reviewable complete pre-AI candidate pool
+        completed = pending_candidates  # prior reviewed/AI-judged jobs stay in history, not the queue
     else:
         completed, ai = Evaluator(candidate_profile, PersonalCache(), max_calls=max_ai).evaluate(shortlist)
         eval_stats.update(ai)
     eval_stats["request_provenance"] = http.request_log
-    history_file = Path(report_path).with_name("personal_discovery_history.local.json")
-    eval_stats["history"] = update_history(history_file, candidates)
+    judged_now = {job["job_url"] for job in completed if job.get("assessment")}
+    eval_stats["history"] = update_history(history_file, unique, evaluated_urls=judged_now)
     eval_stats["history_file"] = str(history_file)
     path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
     if write_sheet:
