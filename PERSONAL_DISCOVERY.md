@@ -102,3 +102,53 @@ Choose `reviewed`, `dismissed`, `applied` or `pending` (to reopen). The exact UR
 **Seen is not judged:** Previously discovered but unreviewed opportunities remain in the pending review queue. Successful AI evaluations are automatically marked `ai_judged`. The collector excludes human-reviewed and AI-judged jobs from future pending/AI queues and preserves them in its all-jobs audit. If a judged posting changes, it is flagged as `content_updated_since_review` for manual rechecking without automatically reopening it.
 
 The report includes `new_postings`, `new_candidates`, `pending_for_review`, and `already_judged_skipped`. The screening audit adds `seen_before`, `review_status`, and `ai_judged`. This uses no additional provider requests, no Gemini calls, no Google Sheet writes, no scheduler, and no outreach. Never commit the private history file.
+
+
+## Offline Gemini pilot (no repeat provider collection)
+
+Use a saved collect-only report with full retained descriptions, not another job-board run:
+
+```powershell
+python personal_offline_batch.py
+```
+
+The default is an **offline preview**, reapplying v4.1 flags and skipping every
+URL marked `reviewed`, `dismissed`, `applied` or already AI-judged in
+`personal_discovery_history.local.json`. It selects up to 20 jobs (at most
+12 original core candidates plus selected adjacent roles on the v4 baseline).
+Geography uncertainty is preserved. Explicit specialist/leadership gaps remain
+in manual review; they do not become automatic fits.
+
+Before evaluating, place your verified private CV evidence at
+`profiles/personal_profile.local.txt` (or set `PERSONAL_PROFILE_PATH` in
+the local `.env`). Do not commit your profile or API key.
+The project's `GEMINI_API_KEY`, `PERSONAL_GEMINI_MODEL` and
+`PERSONAL_GEMINI_FREE_TIER_CONFIRMED=YES` must be configured. The last flag
+is an acknowledgement, **not** proof of a zero-cost Google billing tier.
+
+```powershell
+python personal_offline_batch.py --evaluate
+```
+
+This calls Gemini **at most once** for up to 20 previously collected jobs,
+saves `personal_offline_ai_v1.json`, and marks **only successfully
+evaluated/cached** jobs as AI-judged. Re-running skips judged URLs and
+preserves already saved AI results. It never calls Arbeitnow, Himalayas,
+Jobicy or Remotive; it does not write Google Sheets or send applications.
+The existing SQLite evaluation cache remains usable.
+
+After examining the saved AI results, publish to the **separate personal**
+Google Sheet only with this explicit command:
+
+```powershell
+python personal_offline_batch.py --sync-sheet
+```
+
+Sheet publication requires `PERSONAL_GOOGLE_SHEET_ID` in `.env`, the
+existing `credentials/google-service-account.json`, and Editor access for
+the service account's `client_email` on that blank personal spreadsheet.
+An ID alone does not confer write access. Never point this at the original
+RAY demonstration sheet. If the credential file does not exist, the separate
+sync command fails without writing.
+
+Tests: `python -m unittest discover -s tests -p "test_personal*.py" -v`.
