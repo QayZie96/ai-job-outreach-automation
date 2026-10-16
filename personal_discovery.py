@@ -30,11 +30,19 @@ REMOTIVE = "https://remotive.com/api/remote-jobs"
 HIMALAYAS = "https://himalayas.app/jobs/api/search"
 JOBICY = "https://jobicy.com/api/v2/remote-jobs"
 ADZUNA = "https://api.adzuna.com/v1/api/jobs/gb/search/1"
-HIMALAYAS_QUERIES = ("ecommerce operations", "marketplace operations",
-                     "business operations", "catalog operations")
-JOBICY_FILTERS = (("operations", "europe"), ("ecommerce", "anywhere"))
+# All six Himalayas searches are intentionally broad *single-term* searches.
+# This covers core and adjacent families without multiplying keyword variants.
+# The unfiltered GR query is intentionally first to catch unexpected job titles.
+# GR may also include worldwide postings; provider metadata is not eligibility proof.
+HIMALAYAS_QUERIES = (None, "operations", "ecommerce", "automation",
+                     "marketing", "analyst")
+# Query-by-geography instead of restrictive combinations such as
+# tag=operations+geo=europe; keep titles and full employer descriptions locally.
+JOBICY_FILTERS = ((None, "europe"), (None, "anywhere"))
+# Fixed hard ceilings per manual run, independently of .env values.
 DEFAULT_LIMITS = {"Arbeitnow": 2, "Remotive": 1, "Adzuna": 0,
-                  "Himalayas": 4, "Jobicy": 2}
+                  "Himalayas": 6, "Jobicy": 2}
+HARD_PROVIDER_LIMITS = dict(DEFAULT_LIMITS)
 TARGET_TERMS = (
     "operation", "e-commerce", "ecommerce", "marketplace", "catalog",
     "merchandis", "category", "product data", "product information",
@@ -61,24 +69,41 @@ class ProviderError(RuntimeError):
 class BudgetedHTTP:
     def __init__(self, limits=None, session=None):
         self.limits = dict(limits if limits is not None else DEFAULT_LIMITS)
+        for provider, limit in self.limits.items():
+            if provider not in HARD_PROVIDER_LIMITS or not 0 <= limit <= HARD_PROVIDER_LIMITS[provider]:
+                raise ValueError(f"{provider}: manual HTTP budget exceeds fixed safe ceiling")
         self.calls = Counter()
         self.session = session or requests.Session()
+        self.blocked = set()  # stop this provider on 429, including later planned queries
+        self.request_log = []  # safe metadata only; never log API credentials
 
     def get_json(self, source, url, params=None):
-        # At most two attempts; failed attempts count against source budget.
+        if source in self.blocked:
+            raise ProviderError(f"{source} stopped after 429; no further requests")
+        # Retries also spend budget. Record attempt provenance without credentials.
+        # Do not repeat a query after the provider explicitly rate-limits it.
+        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry"}
+        safe_params = {k: v for k, v in (params or {}).items() if k in safe_keys}
         for attempt in range(2):
             if self.calls[source] >= self.limits.get(source, 0):
                 raise ProviderError(f"{source} API request budget exhausted")
             self.calls[source] += 1
+            entry = {"source": source, "path": urlsplit(url).path,
+                     "parameters": safe_params, "attempt": attempt + 1,
+                     "outcome": "request_error"}
+            self.request_log.append(entry)
             try:
                 response = self.session.get(url, params=params, timeout=20,
                                             headers={"Accept": "application/json"})
+                entry["outcome"] = response.status_code
                 if response.status_code == 200:
                     payload = response.json()
                     if not isinstance(payload, dict):
                         raise ProviderError(f"{source}: invalid response schema")
+                    entry["returned"] = len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
                     return payload
                 if response.status_code == 429:
+                    self.blocked.add(source)
                     raise ProviderError(f"{source} rate limited (429); no retry")
                 if response.status_code not in {500, 502, 503, 504}:
                     raise ProviderError(f"{source}: HTTP {response.status_code}")
@@ -223,8 +248,10 @@ def normalize_original(source, raw):
 def collect(http):
     jobs, stats, errors = [], Counter(), []
 
-    def add(source, raw, convert):
+    def add(source, raw, convert, query="unfiltered"):
         data = convert(raw)
+        for job in data:
+            job["source_query"] = query
         stats[source] += len(data)
         jobs.extend(data)
 
@@ -266,27 +293,40 @@ def collect(http):
         errors.append(str(exc))
 
     for query in HIMALAYAS_QUERIES:
-        if http.calls["Himalayas"] >= http.limits.get("Himalayas", 0):
+        if (http.calls["Himalayas"] >= http.limits.get("Himalayas", 0)
+                or "Himalayas" in http.blocked):
             break
         try:
-            payload = http.get_json("Himalayas", HIMALAYAS,
-                                    {"q": query, "country": "GR", "sort": "recent", "page": 1})
+            params = {"country": "GR", "sort": "recent", "page": 1}
+            if query:
+                params["q"] = query
+            payload = http.get_json("Himalayas", HIMALAYAS, params)
             if payload.get("success") is False:
                 raise ProviderError("Himalayas response indicates failure")
-            add("Himalayas", payload.get("jobs") or [], normalize_himalayas)
+            add("Himalayas", payload.get("jobs") or [], normalize_himalayas,
+                query=f"GR:{query or 'all'}:p1")
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
+            if "Himalayas" in http.blocked:
+                break
 
     for tag, geo in JOBICY_FILTERS:
-        if http.calls["Jobicy"] >= http.limits.get("Jobicy", 0):
+        if (http.calls["Jobicy"] >= http.limits.get("Jobicy", 0)
+                or "Jobicy" in http.blocked):
             break
         try:
-            payload = http.get_json("Jobicy", JOBICY, {"count": 100, "tag": tag, "geo": geo})
+            params = {"count": 200, "geo": geo}
+            if tag:
+                params["tag"] = tag
+            payload = http.get_json("Jobicy", JOBICY, params)
             if payload.get("success") is False:
                 raise ProviderError(f"Jobicy: {payload.get('error', 'API failed')}")
-            add("Jobicy", payload.get("jobs") or [], normalize_jobicy)
+            add("Jobicy", payload.get("jobs") or [], normalize_jobicy,
+                query=f"geo:{geo}:all")
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
+            if "Jobicy" in http.blocked:
+                break
     return jobs, stats, errors
 
 
@@ -343,6 +383,24 @@ ADJACENT_TITLE = (
     "business transformation", "commercial excellence", "operational excellence",
     "project manager", "program manager", "programme manager", "process manager",
     "business support", "growth operations", "service delivery", "trade support",
+    # Transferable roles from verified CV experience; title alone never
+    # asserts hireability and most of these should remain human-review only.
+    "marketing", "crm", "retention", "lifecycle", "campaign", "seo",
+    "content specialist", "content manager", "web manager", "website manager",
+    "data analyst", "reporting analyst", "business intelligence", "revenue analyst",
+    "office assistant", "administrative assistant", "project coordinator",
+    "project assistant", "shopify specialist", "brand manager", "product manager",
+    "customer solutions consultant", "customer solutions specialist",
+)
+# Direct experience in these domains is not proven by merely operating a
+# marketplace; a plausible role stays visible without taking Gemini budget.
+TRANSFERABLE_REVIEW_TITLES = (
+    "marketing", "crm", "retention", "lifecycle", "campaign", "seo",
+    "content specialist", "content manager", "web manager", "website manager",
+    "data analyst", "reporting analyst", "business intelligence", "revenue analyst",
+    "office assistant", "administrative assistant", "project coordinator",
+    "project assistant", "shopify specialist", "product manager",
+    "customer solutions consultant", "customer solutions specialist",
 )
 STRONG_DESCRIPTION_SIGNALS = (
     "ecommerce", "e-commerce", "marketplace", "product data", "product information",
@@ -351,6 +409,9 @@ STRONG_DESCRIPTION_SIGNALS = (
     "workflow automation", "process automation", "operations management",
     "seller", "product listing", "order processing", "logistics coordination",
     "business operations", "process improvement", "supplier coordination",
+    "crm", "marketing automation", "email marketing", "web analytics",
+    "digital marketing", "customer retention", "data reporting", "power bi",
+    "sql", "google analytics", "marketing campaign", "api integration",
 )
 OPERATIONAL_ACTIONS = (
     "manage", "manage and", "optimiz", "improv", "coordinat", "implement",
@@ -515,7 +576,7 @@ def preliminary_eligibility(job):
                 and re.search(r"\bhybrid\s+(?:setup|model|work|working)|"
                               r"\bminimum\s+of\s+\w+\s+days?\s+per\s+week\s+in\s+the\s+office|"
                               r"\brole\s+is\s+based\s+in\s+our\s+\w+\s+office", desc)):
-            return "eligible", "Employer describes EU office-based/hybrid work; relocation needed"
+            return "uncertain", "Employer describes EU office-based/hybrid work; relocation needed"
         if _has_phrase(place, "greece") or _has_phrase(place, "athens"):
             return "eligible", "Remote listing explicitly includes Greece"
         if re.search(
@@ -534,7 +595,7 @@ def preliminary_eligibility(job):
     if _has_any(place, NON_EU_LOCATIONS):
         return "ineligible", "On-site/hybrid location outside the EU"
     if _has_any(place, EU_COUNTRIES + EU_CITIES):
-        return "eligible", "EU location permits relocation review"
+        return "uncertain", "EU location permits relocation review"
     return "uncertain", "On-site/hybrid location unclear"
 
 
@@ -600,7 +661,11 @@ def screen_candidates(jobs, audit=None):
         status, reason = preliminary_eligibility(job) if role_score else ("not_checked", "role excluded before eligibility check")
         senior_executive = bool(re.search(r"\b(?:director|head of|vice president|vp|chief of staff)\b",
                                           str(job.get("job_title") or ""), re.IGNORECASE))
-        exploratory = bool(role_score and (role_score < 45 or senior_executive))
+        title = str(job.get("job_title") or "").lower()
+        # Keep adjacent marketing/data/web opportunities visible; don't promote
+        # them into an AI shortlist on generic company-description matches.
+        transferable_only = _has_any(title, TRANSFERABLE_REVIEW_TITLES) and not _has_any(title, ROLE_TERMS)
+        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only))
         outcome = "review_only" if exploratory else "candidate"
         if not role_score:
             counts["role_out_of_scope"] += 1
@@ -628,6 +693,8 @@ def screen_candidates(jobs, audit=None):
                 "location": job.get("location", ""),
                 "remote": job.get("remote"),
                 "job_url": job.get("job_url", ""),
+                "source_query": job.get("source_query", "legacy/unknown"),
+                "description_excerpt": description_text(job)[:2500],
                 "role_score": role_score,
                 "role_reason": role_reason,
                 "eligibility": status,
@@ -645,6 +712,7 @@ def write_screening_audit(report_path, audit):
     dest = Path(report_path).with_name(Path(report_path).stem + "_screening_audit.csv")
     dest.parent.mkdir(parents=True, exist_ok=True)
     fields = ("source", "company", "job_title", "location", "remote", "job_url",
+              "source_query", "description_excerpt",
               "role_score", "role_reason", "eligibility", "eligibility_reason",
               "screen_outcome", "priority", "ai_selected")
     with dest.open("w", newline="", encoding="utf-8-sig") as fh:
@@ -695,11 +763,11 @@ def write_report(path, jobs, raw_stats, calls, errors, evaluation_stats):
 
 def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json", session=None):
     load_dotenv(BASE / ".env")
-    limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 2),
-              "Remotive": env_int("PERSONAL_MAX_REMOTIVE_CALLS", 1),
-              "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0),
-              "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 4),
-              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 2)}
+    limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 2, maximum=2),
+              "Remotive": env_int("PERSONAL_MAX_REMOTIVE_CALLS", 1, maximum=1),
+              "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=0),
+              "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 6, maximum=6),
+              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 2, maximum=2)}
     max_ai = env_int("PERSONAL_MAX_GEMINI_CALLS", 5, maximum=10)
     if write_sheet and collect_only:
         raise ValueError("Cannot write unevaluated jobs to Sheets")
@@ -725,7 +793,12 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     audit_file = write_screening_audit(report_path, audit)
     candidates.sort(key=lambda j: (-j["priority"], j.get("source", ""),
                                    j.get("job_url", "")))
-    eval_stats = {"unique": len(unique), "prefiltered_candidates": len(candidates),
+    incremental = Counter((job["source"], job.get("source_query", "legacy/unknown"))
+                          for job in unique)
+    eval_stats = {"incremental_unique_by_query": [
+                      {"source": s, "query": q, "new_unique": count}
+                      for (s, q), count in sorted(incremental.items())],
+                  "unique": len(unique), "prefiltered_candidates": len(candidates),
                   "precheck": screen_stats, "rejections_by_source": rejection_by_source,
                   "ai_shortlist_count": len(shortlist), "ai_shortlist_limit": selection_limit,
                   "exploratory_review_only": len(candidates) - len(scoring_pool),
@@ -739,6 +812,7 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     else:
         completed, ai = Evaluator(candidate_profile, PersonalCache(), max_calls=max_ai).evaluate(shortlist)
         eval_stats.update(ai)
+    eval_stats["request_provenance"] = http.request_log
     path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
     if write_sheet:
         from personal_sheets import write_personal_results
