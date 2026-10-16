@@ -59,3 +59,24 @@ This patch was built from the **GitHub `main` snapshot at commit `1a80483a90cdda
 ## 16 October 2026: retrospective filter audit (offline, partial)
 
 The original `personal_run.json` stored **only 364** description/title-prefiltered candidates from 722 unique listings, not the full raw source inventory. Replaying that 364-job subset through the balanced screen produced **27 visible postings**: 16 prioritized AI-eligible and 11 exploratory/manual-review-only. That is a retrospective **subset**, *not a measurement over all 722 unique jobs*. The previous strict screen returned 15 on the original full run. A fresh collect-only run will write one auditable row for each unique posting (e.g. all 722 if providers again return the same cohort), letting us properly measure false negatives and confirm which missed jobs are genuinely actionable. No AI, outreach, or Sheet write is required for this audit.
+
+## v4.1: Offline screening calibration and local observation history
+
+- Provider query plans and maximum HTTP attempts are unchanged (**Arbeitnow 2, Remotive 1, Himalayas 6, Jobicy 2, Adzuna 0**).
+- `personal_screening_v41.py` checks evidenced mandatory languages (including English+Spanish and Ukrainian/Russian requirements), flags degrees without demonstrated experience alternatives, substantial leadership tenure, named specialist platforms and explicit AI-model annotation roles. Hard exclusions are conservative; nonlanguage degree/tenure gaps go to manual review rather than being presented as fit.
+- Broad marketing/CRM, administrative and adjacent operational work remains reviewable, with stronger category-sensitive manual-review ordering.
+- Each manual collect run updates **`personal_discovery_history.local.json`** in the report directory. It is Git-ignored. Previously found jobs absent from a later feed are marked `not_seen_in_latest_run_status_unknown`, **not closed**. Feed presence is also **not proof the employer is accepting applications**.
+- Seed prior observations once using existing local reports, oldest first, before your first v4.1 run:
+
+```powershell
+.\.venv\Scripts\python.exe personal_screening_v41.py --seed-reports personal_run_v3.json personal_run_v4.json
+```
+
+- Replay a frozen v4 audit offline, using the 85 retained jobs' full descriptions where possible:
+
+```powershell
+.\.venv\Scripts\python.exe personal_screening_v41.py --audit personal_run_v4_screening_audit.csv --report personal_run_v4.json --output personal_run_v41_replay.csv
+```
+
+- Replay does **not** contact providers or invoke AI/Sheets. Of the 908 screened URLs in the 16 Oct 2026 v4 sample, 85 had full text and 823 have only 2,500-character audit excerpts. Its output is a conservative, same-inventory comparison, not a completeness or current-opening guarantee.
+- Offline tests: `python -m unittest discover -s tests -p 'test_personal*.py' -v` (tests use local fixtures, no API). For a full run the existing manual `--live --collect-only` command is unchanged and must be separately approved against providers' rolling quotas.
