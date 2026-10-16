@@ -58,6 +58,30 @@ class OfflinePilotTests(unittest.TestCase):
             self.assertTrue(current[job["job_url"]]["ai_judged"])
             self.assertEqual(current["https://example.test/other"], previous["https://example.test/other"])
 
+    def test_failed_gemini_request_is_diagnostic_and_safe(self):
+        from personal_evaluation import Evaluator, safe_failure_details
+        class BadModels:
+            def generate_content(self, **kwargs):
+                raise RuntimeError("429 quota exceeded for API key AIzaTESTKEYCANARY123456")
+        class BadClient:
+            models = BadModels()
+        class EmptyCache:
+            def get(self, job, fingerprint): return None
+            def put(self, job, fingerprint, result):
+                self.fail("Failed batch must never write cache")
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "AIzaTESTKEYCANARY123456"}):
+            evaluator = Evaluator("verified CV evidence", EmptyCache(),
+                                  max_calls=1, client=BadClient())
+            jobs, stats = evaluator.evaluate([example(1)])
+        self.assertEqual(jobs, [])
+        self.assertEqual(stats["gemini_calls"], 1)
+        self.assertEqual(stats["failed_batches"], 1)
+        self.assertEqual(stats["failure_details"][0]["stage"], "request")
+        self.assertEqual(stats["failure_details"][0]["batch_size"], 1)
+        self.assertNotIn("AIzaTESTKEYCANARY123456",
+                         stats["failure_details"][0]["message"])
+        self.assertIn("[REDACTED_API_KEY]", stats["failure_details"][0]["message"])
+
     def test_preview_does_not_write_or_use_gemini(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
