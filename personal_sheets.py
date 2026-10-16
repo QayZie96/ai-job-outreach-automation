@@ -34,6 +34,7 @@ LEGACY_TO_SHEET = {
 }
 VIEWS = {"Strong Matches": "Strong Match", "Review Queue": "Review"}
 VIEW_FORMULAS = {
+    "New Leads": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col8 = \'Untriaged\' and Col12 <> \'Dismissed\' order by Col7 desc",0),"")',
     "Apply First": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where (Col8 = \'P1\' or Col8 = \'P2\') and Col12 <> \'Dismissed\' order by Col9 asc",0),"")',
     "Strong Matches": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col10 = \'Strong Match\' and Col12 <> \'Dismissed\'",0),"")',
     "Review Queue": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col10 = \'Review\' and Col12 <> \'Dismissed\'",0),"")',
@@ -62,7 +63,7 @@ def _setup(service, spreadsheet_id):
     sheets_api = service.spreadsheets()
     metadata = sheets_api.get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title").execute()
     existing = {s["properties"]["title"] for s in metadata.get("sheets", [])}
-    required = ["Evaluations", "Run Summary", "Apply First", "Pending AI", *VIEWS]
+    required = ["Evaluations", "Run Summary", "Pending AI", *VIEW_FORMULAS]
     additions = [{"addSheet": {"properties": {"title": title}}}
                  for title in required if title not in existing]
     if additions:
