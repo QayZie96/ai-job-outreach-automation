@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections import Counter
 import hashlib
+import re
 from datetime import datetime, timezone
 import os
 
@@ -32,14 +33,26 @@ LEGACY_TO_SHEET = {
     "Salary (as posted)": "Advertised Salary",
     "Fit Score": "AI Fit Score",
 }
-VIEWS = {"Strong Matches": "Strong Match", "Review Queue": "Review"}
-VIEW_FORMULAS = {
-    "New Leads": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col8 = \'Untriaged\' and Col12 <> \'Dismissed\' order by Col7 desc",0),"")',
-    "Apply First": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where (Col8 = \'P1\' or Col8 = \'P2\') and Col12 <> \'Dismissed\' order by Col9 asc",0),"")',
-    "Strong Matches": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col10 = \'Strong Match\' and Col12 <> \'Dismissed\'",0),"")',
-    "Review Queue": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col10 = \'Review\' and Col12 <> \'Dismissed\'",0),"")',
+VIEW_QUERIES = {
+    "New Leads": "Col8 = 'Untriaged' and Col12 <> 'Dismissed' order by Col7 desc",
+    "Apply First": "(Col8 = 'P1' or Col8 = 'P2') and Col12 <> 'Dismissed' order by Col9 asc",
+    "Strong Matches": "Col10 = 'Strong Match' and Col12 <> 'Dismissed'",
+    "Review Queue": "Col10 = 'Review' and Col12 <> 'Dismissed'",
 }
+VIEW_TITLE_FORMULA = (
+    '=IF(OR(A2="",N2=""),"",HYPERLINK(N2,'
+    'IFERROR(VLOOKUP(A2,Evaluations!A:C,3,FALSE),"")))'
+)
 
+def _view_formulas(where):
+    query = f'QUERY(Evaluations!A2:AA,"select * where {where}",0)'
+    other = ",".join(str(i) for i in range(4, len(SHEET_HEADERS) + 1))
+    return {
+        "A2": f'=IFERROR(LET(q,{query},CHOOSECOLS(q,1,2)),"")',
+        "D2": f'=IFERROR(LET(q,{query},CHOOSECOLS(q,{other})),"")',
+    }
+
+VIEW_FORMULAS = {name: _view_formulas(where) for name, where in VIEW_QUERIES.items()}
 
 def verify_spreadsheet_destination():
     personal = os.getenv("PERSONAL_GOOGLE_SHEET_ID", "").strip()
@@ -61,14 +74,25 @@ def _service():
 
 def _setup(service, spreadsheet_id):
     sheets_api = service.spreadsheets()
-    metadata = sheets_api.get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title").execute()
-    existing = {s["properties"]["title"] for s in metadata.get("sheets", [])}
+    metadata = sheets_api.get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title,gridProperties))",
+    ).execute()
+    existing = {item["properties"]["title"]: item["properties"]
+                for item in metadata.get("sheets", [])}
     required = ["Evaluations", "Run Summary", "Pending AI", *VIEW_FORMULAS]
-    additions = [{"addSheet": {"properties": {"title": title}}}
-                 for title in required if title not in existing]
+    additions = [{"addSheet": {"properties": {
+        "title": title, "gridProperties": {"rowCount": 1000, "columnCount": 27}
+    }}} for title in required if title not in existing]
     if additions:
         sheets_api.batchUpdate(spreadsheetId=spreadsheet_id,
                                body={"requests": additions}).execute()
+        metadata = sheets_api.get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title,gridProperties))",
+        ).execute()
+        existing = {item["properties"]["title"]: item["properties"]
+                    for item in metadata.get("sheets", [])}
     values = sheets_api.values()
     for tab, header in (("Evaluations", SHEET_HEADERS), ("Run Summary", RUN_HEADERS)):
         last = "AA" if tab == "Evaluations" else "N"
@@ -80,16 +104,48 @@ def _setup(service, spreadsheet_id):
         if not rows:
             values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1",
                           valueInputOption="RAW", body={"values": [header]}).execute()
-    # Existing live views have headers on row 1 and formulas in A2.
-    # Never overwrite user-edited formulas or replace the original RAY Sheet.
-    for tab, formula in VIEW_FORMULAS.items():
-        first = values.get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2",
-                           valueRenderOption="FORMULA").execute().get("values", [])
-        if first and first[0] and first[0][0] != formula:
-            raise ValueError(f"{tab} has an unexpected formula in A2; refusing write")
-        if not first:
-            values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2",
-                          valueInputOption="USER_ENTERED", body={"values": [[formula]]}).execute()
+    # QUERY drops source hyperlinks. A:B and D:AA are formula-driven
+    # arrays; C2:C1000 are per-row linked titles (auto relative formulas).
+    for tab, formulas in VIEW_FORMULAS.items():
+        header_row = values.get(spreadsheetId=spreadsheet_id,
+                                range=f"'{tab}'!A1:AA1").execute().get("values", [])
+        if not header_row:
+            values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1",
+                          valueInputOption="RAW",
+                          body={"values": [SHEET_HEADERS]}).execute()
+        for addr, formula in formulas.items():
+            got = values.get(spreadsheetId=spreadsheet_id,
+                             range=f"'{tab}'!{addr}",
+                             valueRenderOption="FORMULA").execute().get("values", [])
+            if got and got[0] and got[0][0] != formula:
+                raise ValueError(f"{tab}!{addr} has an unexpected formula; refusing write")
+            if not got:
+                values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!{addr}",
+                              valueInputOption="USER_ENTERED",
+                              body={"values": [[formula]]}).execute()
+        got_link = values.get(spreadsheetId=spreadsheet_id,
+                              range=f"'{tab}'!C2",
+                              valueRenderOption="FORMULA").execute().get("values", [])
+        if got_link and got_link[0] and got_link[0][0] != VIEW_TITLE_FORMULA:
+            raise ValueError(f"{tab}!C2 has an unexpected hyperlink formula")
+        if not got_link:
+            props = existing[tab]
+            sheets_api.batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"repeatCell": {
+                    "range": {
+                        "sheetId": props["sheetId"],
+                        "startRowIndex": 1,
+                        "endRowIndex": props.get("gridProperties", {}).get("rowCount", 1000),
+                        "startColumnIndex": 2,
+                        "endColumnIndex": 3,
+                    },
+                    "cell": {"userEnteredValue": {"formulaValue": VIEW_TITLE_FORMULA}},
+                    "fields": "userEnteredValue",
+                }}]},
+            ).execute()
+
+
 
 def _row(job, existing=None):
     assessment = job["assessment"]
@@ -117,6 +173,12 @@ def _row(job, existing=None):
         (old[15] if manual_geo_exclusion else assessment["reason"]),
         job.get("salary", ""), old[17] or "New", old[18],
     ]
+
+
+def _job_title_formula(row_num, title):
+    """Escaped hyperlink to the posting URL stored in this same row."""
+    display = str(title or "").replace('"', '""')
+    return f'=IF(N{row_num}="","",HYPERLINK(N{row_num},"{display}"))'
 
 
 def _vacancy_id(url):
@@ -203,6 +265,7 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
               if len(r) > url_col and r[url_col]}
     pending_add = []
     pending_update = []
+    title_links = []
     for job in jobs:
         url = job.get("job_url")
         if not url or "assessment" not in job:
@@ -211,19 +274,44 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
         row = _sheet_row(job, old[1] if old else None)
         if old:
             if row != (list(old[1]) + [""] * max(0, len(SHEET_HEADERS) - len(old[1]))):
-                pending_update.append({"range": f"'Evaluations'!A{old[0]}:AA{old[0]}", "values": [row]})
+                pending_update.append({"range": f"'Evaluations'!A{old[0]}:AA{old[0]}",
+                                       "values": [row]})
+            title_links.append({
+                "range": f"'Evaluations'!C{old[0]}",
+                "values": [[_job_title_formula(old[0], row[2])]],
+            })
         else:
             pending_add.append(row)
             by_url[url] = (-1, row)
     if pending_update:
         values.batchUpdate(spreadsheetId=spreadsheet_id,
-                           body={"valueInputOption": "RAW", "data": pending_update}).execute()
+                           body={"valueInputOption": "RAW",
+                                 "data": pending_update}).execute()
     if pending_add:
-        values.append(spreadsheetId=spreadsheet_id, range="'Evaluations'!A:AA",
-                      valueInputOption="RAW", insertDataOption="INSERT_ROWS",
-                      body={"values": pending_add}).execute()
+        appended = values.append(
+            spreadsheetId=spreadsheet_id, range="'Evaluations'!A:AA",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+            body={"values": pending_add},
+        ).execute()
+        changed_range = appended.get("updates", {}).get("updatedRange", "")
+        found = re.search(r"!A([0-9]+)(?::|$)", changed_range)
+        if not found:
+            raise RuntimeError("Unable to verify appended row positions for title links")
+        first_row = int(found.group(1))
+        for offset, row in enumerate(pending_add):
+            index = first_row + offset
+            title_links.append({
+                "range": f"'Evaluations'!C{index}",
+                "values": [[_job_title_formula(index, row[2])]],
+            })
         _extend_evaluations_table(service, spreadsheet_id,
-                                  1 + len(current) + len(pending_add))
+                                  first_row - 1 + len(pending_add))
+    if title_links:
+        # Job content always uses RAW. Only validated title formulas are parsed
+        # with USER_ENTERED; quoted titles can't inject additional formulas.
+        values.batchUpdate(spreadsheetId=spreadsheet_id,
+                           body={"valueInputOption": "USER_ENTERED",
+                                 "data": title_links}).execute()
     # The five pilot jobs remain in Pending AI until successfully assessed.
     # Update the status, not the source posting details or user's history.
     scored_urls = {str(job.get("job_url") or "") for job in jobs if "assessment" in job}
