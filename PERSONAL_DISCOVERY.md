@@ -152,3 +152,76 @@ RAY demonstration sheet. If the credential file does not exist, the separate
 sync command fails without writing.
 
 Tests: `python -m unittest discover -s tests -p "test_personal*.py" -v`.
+
+
+## Daily operations (personal-only Windows Task Scheduler)
+
+Use the dedicated script `run_personal_ray.ps1` on Windows 10 after a one-time
+manual preflight. The original RAY outreach case study and its Google Sheet
+are never scheduled, modified or used as a destination.
+
+**One-time setup:**
+
+1. From the personal branch checkout, `git pull --ff-only origin feature/ray-personal-job-discovery`
+   and run `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_personal*.py" -q`.
+2. Keep `.env`, `profiles/personal_profile.local.txt`, and
+   `credentials/google-service-account.json` local and gitignored.
+   `PERSONAL_GOOGLE_SHEET_ID` must point to the dedicated *Personal Ray* Sheet;
+   `PERSONAL_GEMINI_FREE_TIER_CONFIRMED=YES` must reflect actual Google billing settings.
+   Share that Sheet as **Editor** with the service account `client_email`
+   from the local JSON credential. Never disclose its private key.
+3. Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_personal_ray.ps1 -PreviewOnly`
+   to inspect the pending shortlist without requests or Sheet writes.
+4. Once, while at the console, run
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_personal_ray.ps1`
+   to verify the live Sheet permission, provider calls and Gemini. This is a live
+   manual run and consumes permitted API quota.
+
+**Daily scheduler:** In Task Scheduler → Create Task, run only when the
+user is logged on (simplest credential behavior), trigger Daily at **09:00**
+using local Windows time, and set Action → Program to
+`powershell.exe`; arguments:
+`-NoProfile -ExecutionPolicy Bypass -File "C:\Users\kwstas\Desktop\ai-automation-case-study\ray-personal-job-discovery\run_personal_ray.ps1"`.
+Set **Start in** to the personal checkout folder without quotation marks.
+Under Settings, use "If the task is already running, do not start a new
+instance", and cap execution at 20 minutes. Windows must be powered on; the
+task does not run on the GitHub servers or inside ChatGPT. To stop, disable
+the task in Task Scheduler.
+
+Full daily workflow: bounded job-provider fetch (max 11 requests per invocation),
+normalization, URL/source-ID dedupe, deterministic screening, persistent
+history skip for reviewed/AI-judged items, at most five Gemini API calls with
+five jobs each, then append/update the *dedicated* Google Sheet. The writer
+preserves human review status, notes, priority and explicit location overrides.
+Each run produces `personal_run.json`, an audit CSV, and dated log files
+under `personal_logs/`; files in `personal_logs` older than 14 days are removed.
+No application or outreach is submitted automatically.
+
+**Frequency:** Initially once daily. Himalayas publicly refreshes its API
+about every 24 hours and Remotive advises at most four polls a day, so
+hourly full scans offer limited discovery benefit. A six-hour Task Scheduler
+repeat is an optional later adjustment after confirming stable runs, quota,
+and incremental discovery; that equates to up to 44 provider calls daily.
+No rapid retry loops are configured on Gemini errors.
+
+**Pending AI (manual queue, without a new provider fetch):**
+
+```powershell
+.\.venv\Scripts\python.exe personal_offline_batch.py --evaluate --limit 5 --include-review 5
+.\.venv\Scripts\python.exe personal_offline_batch.py --sync-sheet
+```
+
+The first command selects up to five still-pending adjacent roles from the
+saved `personal_run_v4.json` and makes at most one Gemini call. If Gemini
+returns 503, the failed roles remain pending. Run `--sync-sheet` only after
+successful scoring; it writes the accumulated saved assessments and marks
+successfully scored rows in the "Pending AI" tab. It never fetches job boards.
+
+**Review loop:** Open *New Leads* for untriaged arrivals; read the AI evidence
+and employer location/requirements; assign priorities in *Evaluations*
+(P1/P2 for Apply First), update Review Status (New → In Review/Applied/etc.)
+and Notes; work from *Apply First*. Other views update through formulas.
+"Strong Match" is withheld when remote Greek employment eligibility remains
+unconfirmed. The stable Vacancy ID in column A is derived from the canonical
+job URL. A batch can fail partially without falsely marking the remaining
+vacancies AI-judged.
