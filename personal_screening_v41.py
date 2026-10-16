@@ -267,3 +267,28 @@ def update_history(history_path: str | Path, jobs: list[dict], timestamp: str | 
         if temp.exists(): temp.unlink()
     return {"tracked": len(previous), "seen_this_run": len(present),
             "not_seen_this_run_status_unknown": len(previous) - len(present)}
+
+def _main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Offline frozen-audit replay and private history seeding; never calls an API.")
+    parser.add_argument("--audit", help="Frozen screening audit CSV (one row per job URL)")
+    parser.add_argument("--report", help="Matching collect-only JSON report, supplies full retained descriptions")
+    parser.add_argument("--output", help="Write replay decisions as CSV")
+    parser.add_argument("--seed-reports", nargs="+", metavar="JSON",
+                        help="Prior collect-only reports, oldest first, to seed local history")
+    parser.add_argument("--history", default="personal_discovery_history.local.json")
+    args = parser.parse_args()
+    if bool(args.audit) == bool(args.seed_reports):
+        parser.error("Pass either --audit or --seed-reports")
+    if args.audit:
+        result = replay_audit(args.audit, args.report, args.output)
+        print(json.dumps({k: v for k, v in result.items() if k != "transitions"}, indent=2))
+    else:
+        for p in args.seed_reports:
+            raw = json.loads(Path(p).read_text(encoding="utf-8"))
+            stats = update_history(args.history, raw["evaluated_jobs"], raw["run_utc"])
+        print(json.dumps(stats, indent=2))
+
+
+if __name__ == "__main__":
+    _main()
