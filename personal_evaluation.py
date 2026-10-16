@@ -30,8 +30,8 @@ def safe_failure_details(exc, *, stage, batch_size):
         message = message.replace(key, "[REDACTED_API_KEY]")
     message = re.sub(r"AIza[A-Za-z0-9_-]{12,}", "[REDACTED_API_KEY]", message)
     message = re.sub(
-        r'(?i)(api[_ -]?key|x-goog-api-key)(\\s*[:=]\\s*["\\']?)[A-Za-z0-9_-]{8,}',
-        r'\\1\\2[REDACTED_API_KEY]', message,
+        r"""(?i)(?:api[_ -]?key|x-goog-api-key)\s*[:=]\s*['"]?[A-Za-z0-9_-]{8,}""",
+        "[REDACTED_API_KEY]", message,
     )
     code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if not isinstance(code, (int, str)):
