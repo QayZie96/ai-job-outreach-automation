@@ -5,6 +5,7 @@ The original six-column RAY Jobs sheet is NEVER read/written by this module.
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 from datetime import datetime, timezone
 import os
 
@@ -15,7 +16,28 @@ HEADERS = ["Job Title", "Company", "Location", "Work Arrangement", "Source", "So
 RUN_HEADERS = ["Run UTC", "Source", "Fetched", "HTTP Attempts", "Evaluated (all sources)",
                "Strong Matches", "Review", "Ineligible", "Low Match", "Cache Hits",
                "Gemini Calls", "Failed Batches", "Unevaluated (budget)", "Errors"]
+# Managed legacy field names retained for stable input normalization and tests.
+# The native Personal Ray spreadsheet uses the human-first 27-column layout.
+SHEET_HEADERS = [
+    "Vacancy ID", "Company Name", "Job Title", "Location", "Work Arrangement",
+    "Advertised Salary", "AI Fit Score", "Application Priority", "Priority Rank",
+    "Decision", "Eligibility", "Review Status", "Recommended Next Action",
+    "Job URL", "Posted", "Checked", "Source", "Source Job ID", "Matched Evidence",
+    "Mandatory Requirements", "Main Gap or Uncertainty", "Reason", "Notes",
+    "Geographic Finding", "Verification State", "Human Review Rationale",
+    "AI Reviewed At",
+]
+LEGACY_TO_SHEET = {
+    "Company": "Company Name",
+    "Salary (as posted)": "Advertised Salary",
+    "Fit Score": "AI Fit Score",
+}
 VIEWS = {"Strong Matches": "Strong Match", "Review Queue": "Review"}
+VIEW_FORMULAS = {
+    "Apply First": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where (Col8 = \'P1\' or Col8 = \'P2\') and Col12 <> \'Dismissed\' order by Col9 asc",0),"")',
+    "Strong Matches": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col10 = \'Strong Match\' and Col12 <> \'Dismissed\'",0),"")',
+    "Review Queue": '=IFERROR(QUERY(Evaluations!A2:AA,"select * where Col10 = \'Review\' and Col12 <> \'Dismissed\'",0),"")',
+}
 
 
 def verify_spreadsheet_destination():
@@ -40,17 +62,15 @@ def _setup(service, spreadsheet_id):
     sheets_api = service.spreadsheets()
     metadata = sheets_api.get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title").execute()
     existing = {s["properties"]["title"] for s in metadata.get("sheets", [])}
-    required = ["Evaluations", "Run Summary", *VIEWS]
+    required = ["Evaluations", "Run Summary", "Apply First", *VIEWS]
     additions = [{"addSheet": {"properties": {"title": title}}}
                  for title in required if title not in existing]
     if additions:
         sheets_api.batchUpdate(spreadsheetId=spreadsheet_id,
                                body={"requests": additions}).execute()
     values = sheets_api.values()
-    for tab, header in (("Evaluations", HEADERS), ("Run Summary", RUN_HEADERS)):
-        # The operational master has manual-priority columns T:Z. Validate
-        # only the managed A:S/A:N headers rather than rejecting those extras.
-        last = "S" if tab == "Evaluations" else "N"
+    for tab, header in (("Evaluations", SHEET_HEADERS), ("Run Summary", RUN_HEADERS)):
+        last = "AA" if tab == "Evaluations" else "N"
         response = values.get(spreadsheetId=spreadsheet_id,
                               range=f"'{tab}'!A1:{last}1").execute()
         rows = response.get("values", [])
@@ -59,16 +79,15 @@ def _setup(service, spreadsheet_id):
         if not rows:
             values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1",
                           valueInputOption="RAW", body={"values": [header]}).execute()
-    # Views are formula-driven so status changes cannot leave stale duplicates.
-    for tab, classification in VIEWS.items():
-        first = values.get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1").execute().get("values", [])
-        formula = f'=QUERY(Evaluations!A:S,"select * where L = \'{classification}\'",1)'
-        if first and first[0] and first[0][0].startswith("=") and first[0][0] != formula:
-            raise ValueError(f"{tab} has a different formula; refusing overwrite")
+    # Existing live views have headers on row 1 and formulas in A2.
+    # Never overwrite user-edited formulas or replace the original RAY Sheet.
+    for tab, formula in VIEW_FORMULAS.items():
+        first = values.get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2").execute().get("values", [])
+        if first and first[0] and first[0][0] != formula:
+            raise ValueError(f"{tab} has an unexpected formula in A2; refusing write")
         if not first:
-            values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1",
+            values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2",
                           valueInputOption="USER_ENTERED", body={"values": [[formula]]}).execute()
-
 
 def _row(job, existing=None):
     assessment = job["assessment"]
@@ -98,13 +117,48 @@ def _row(job, existing=None):
     ]
 
 
+def _vacancy_id(url):
+    """Stable identity independent of worksheet row number or reordering."""
+    return "RAY-" + hashlib.sha256(str(url).encode("utf-8")).hexdigest()[:10].upper()
+
+
+def _sheet_row(job, existing=None):
+    """Map stable legacy AI fields onto the human-first Sheet layout.
+
+    Preserve manual status, notes, priorities and geography overrides on sync.
+    """
+    prior = dict(zip(SHEET_HEADERS, list(existing or [])))
+    old_legacy = [prior.get(LEGACY_TO_SHEET.get(key, key), "")
+                  for key in HEADERS]
+    legacy_values = _row(job, old_legacy)
+    out = {LEGACY_TO_SHEET.get(key, key): value
+           for key, value in zip(HEADERS, legacy_values)}
+    url = str(job.get("job_url") or "")
+    out["Vacancy ID"] = prior.get("Vacancy ID") or _vacancy_id(url)
+    for key in ("Application Priority", "Priority Rank", "Recommended Next Action",
+                "Geographic Finding", "Verification State",
+                "Human Review Rationale", "AI Reviewed At"):
+        out[key] = prior.get(key, "")
+    if not out["Application Priority"]:
+        out["Application Priority"] = "Untriaged"
+    if not out["Recommended Next Action"]:
+        out["Recommended Next Action"] = "Verify location eligibility and review fit"
+    if not out["Verification State"]:
+        out["Verification State"] = "Manual verification required"
+    if not out["AI Reviewed At"]:
+        out["AI Reviewed At"] = datetime.now(timezone.utc).date().isoformat()
+    return [out.get(key, "") for key in SHEET_HEADERS]
+
+
 def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats):
     spreadsheet_id = verify_spreadsheet_destination()
     service = _service()
     _setup(service, spreadsheet_id)
     values = service.spreadsheets().values()
-    current = values.get(spreadsheetId=spreadsheet_id, range="'Evaluations'!A2:S").execute().get("values", [])
-    by_url = {r[6]: (i + 2, r) for i, r in enumerate(current) if len(r) > 6 and r[6]}
+    current = values.get(spreadsheetId=spreadsheet_id, range="'Evaluations'!A2:AA").execute().get("values", [])
+    url_col = SHEET_HEADERS.index("Job URL")
+    by_url = {r[url_col]: (i + 2, r) for i, r in enumerate(current)
+              if len(r) > url_col and r[url_col]}
     pending_add = []
     pending_update = []
     for job in jobs:
@@ -112,10 +166,10 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
         if not url or "assessment" not in job:
             continue
         old = by_url.get(url)
-        row = _row(job, old[1] if old else None)
+        row = _sheet_row(job, old[1] if old else None)
         if old:
-            if row != (list(old[1]) + [""] * max(0, len(HEADERS) - len(old[1]))):
-                pending_update.append({"range": f"'Evaluations'!A{old[0]}:S{old[0]}", "values": [row]})
+            if row != (list(old[1]) + [""] * max(0, len(SHEET_HEADERS) - len(old[1]))):
+                pending_update.append({"range": f"'Evaluations'!A{old[0]}:AA{old[0]}", "values": [row]})
         else:
             pending_add.append(row)
             by_url[url] = (-1, row)
@@ -123,7 +177,7 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
         values.batchUpdate(spreadsheetId=spreadsheet_id,
                            body={"valueInputOption": "RAW", "data": pending_update}).execute()
     if pending_add:
-        values.append(spreadsheetId=spreadsheet_id, range="'Evaluations'!A:S",
+        values.append(spreadsheetId=spreadsheet_id, range="'Evaluations'!A:AA",
                       valueInputOption="RAW", insertDataOption="INSERT_ROWS",
                       body={"values": pending_add}).execute()
     decisions = Counter(j["assessment"]["decision"] for j in jobs if "assessment" in j)
