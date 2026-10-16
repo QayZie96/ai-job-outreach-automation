@@ -857,12 +857,15 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
         eval_stats.update(ai)
     eval_stats["request_provenance"] = http.request_log
     judged_now = {job["job_url"] for job in completed if job.get("assessment")}
-    eval_stats["history"] = update_history(history_file, unique, evaluated_urls=judged_now)
-    eval_stats["history_file"] = str(history_file)
-    path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
+    # Publish before marking any jobs AI-judged. If Sheet access fails,
+    # cached Gemini assessments remain recoverable on the next scheduled run.
+    # Otherwise a completed-but-unpublished job would be silently skipped.
     if write_sheet:
         from personal_sheets import write_personal_results
         write_personal_results(completed, stats, http.calls, errors, eval_stats)
+    eval_stats["history"] = update_history(history_file, unique, evaluated_urls=judged_now)
+    eval_stats["history_file"] = str(history_file)
+    path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
     print(f"Personal run complete: {len(raw)} fetched, {len(unique)} unique, "
           f"{len(candidates)} screened candidates, {len(shortlist)} AI shortlist, "
           f"{len(completed)} evaluated/collected. "
