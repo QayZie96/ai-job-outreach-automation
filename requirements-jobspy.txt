@@ -1,0 +1,3 @@
+# Isolated JobSpy environment; do not install in scheduled production checkout.
+-r requirements.txt
+python-jobspy==1.3.0
