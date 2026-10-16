@@ -545,6 +545,8 @@ class Tests(unittest.TestCase):
                 result.execute.return_value = {"values": [sheet.SHEET_HEADERS]}
             elif kwargs["range"].startswith("'Run Summary'!"):
                 result.execute.return_value = {"values": [sheet.RUN_HEADERS]}
+            elif kwargs["range"].endswith("!A2"):
+                result.execute.return_value = {"values": []}
             else:
                 result.execute.return_value = {"values": [["Header"]]}
             return result
