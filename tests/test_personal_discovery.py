@@ -613,5 +613,35 @@ class Tests(unittest.TestCase):
 
 
 
+    def test_collect_only_keeps_seen_pending_but_hides_user_reviewed(self):
+        import personal_screening_v41 as tracking
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "personal_run.json"
+            history = Path(td) / "personal_discovery_history.local.json"
+            job = dict(JOB)
+            tracking.update_history(history, [job], "2026-10-16T12:00:00Z")
+            tracking.mark_review(history, job["job_url"], "reviewed")
+            with patch.object(d, "collect", return_value=([dict(job)], {"Jobicy": 1}, [])):
+                out, stats = d.run(collect_only=True, report_path=str(report))
+            self.assertEqual(len(out), 0)
+            self.assertEqual(stats["prefiltered_candidates"], 1)
+            self.assertEqual(stats["pending_for_review"], 0)
+            self.assertEqual(stats["already_judged_skipped"], 1)
+            self.assertEqual(stats["history"]["seen_this_run"], 1)
+            self.assertEqual(tracking.load_history(history)[job["job_url"]]["review_status"], "reviewed")
+
+    def test_collect_only_first_seen_job_stays_pending_for_first_judgment(self):
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "personal_run.json"
+            with patch.object(d, "collect", return_value=([dict(JOB)], {"Jobicy": 1}, [])):
+                out, stats = d.run(collect_only=True, report_path=str(report))
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0]["discovery_status"], "new")
+            self.assertEqual(stats["new_postings"], 1)
+            self.assertEqual(stats["pending_for_review"], 1)
+            self.assertEqual(stats["history"]["new_in_history"], 1)
+
+
+
 if __name__ == "__main__":
     unittest.main()
