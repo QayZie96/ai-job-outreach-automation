@@ -35,3 +35,7 @@ personal_run*.json
 
 # Screening audit includes external posting URLs and review metadata
 personal_*_screening_audit.csv
+
+# Private persistent discovery history and offline calibration outputs
+personal_discovery_history.local.json
+personal_run*_replay.csv
