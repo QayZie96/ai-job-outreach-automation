@@ -167,7 +167,7 @@ class Tests(unittest.TestCase):
             http.get_json("Jobicy", d.JOBICY)
 
     def test_429_fails_immediately(self):
-        http = d.BudgetedHTTP({"Jobicy": 5}, FakeSession([FakeResponse(429)]))
+        http = d.BudgetedHTTP({"Jobicy": 2}, FakeSession([FakeResponse(429)]))
         with self.assertRaisesRegex(d.ProviderError, "429"):
             http.get_json("Jobicy", d.JOBICY)
         self.assertEqual(http.calls["Jobicy"], 1)
@@ -356,7 +356,7 @@ class Tests(unittest.TestCase):
             "Most colleagues operate in a hybrid setup with two office days per week."
         )}
         eligibility, reason = d.preliminary_eligibility(hybrid)
-        self.assertEqual(eligibility, "eligible")
+        self.assertEqual(eligibility, "uncertain")
         self.assertIn("relocation", reason)
         self.assertEqual(d.preliminary_eligibility(
             {**JOB, "remote": False, "location": "London"})[0], "ineligible")
@@ -512,6 +512,65 @@ class Tests(unittest.TestCase):
         row = sheet._row({**JOB, "assessment": ev.classify(dict(VALID), JOB)}, old)
         self.assertEqual(row[17:], ["Applied", "Keep manual note"])
         self.assertEqual(row[10], 83)
+
+    def test_broader_role_families_reach_manual_review(self):
+        for title in ("CRM & Retention Manager", "Marketing Event Manager - EMEA",
+                      "Data Analyst", "Remote Office Assistant", "Shopify Specialist",
+                      "Website Manager", "Customer Solutions Consultant"):
+            with self.subTest(title=title):
+                j = {**JOB, "job_title": title, "job_description": "Coordinate campaigns and business reporting."}
+                audit = []
+                pool, _, _ = d.screen_candidates([j], audit)
+                self.assertEqual(len(pool), 1)
+                self.assertTrue(pool[0]["review_only"])
+                self.assertEqual(audit[0]["screen_outcome"], "review_only")
+
+    def test_provider_query_breadth_and_limits(self):
+        self.assertEqual(len(d.HIMALAYAS_QUERIES), 6)
+        self.assertIsNone(d.HIMALAYAS_QUERIES[0])
+        self.assertTrue({"operations", "ecommerce", "automation", "marketing", "analyst"}
+                        <= set(d.HIMALAYAS_QUERIES))
+        self.assertEqual(d.JOBICY_FILTERS, ((None, "europe"), (None, "anywhere")))
+        with self.assertRaises(ValueError):
+            d.BudgetedHTTP({"Himalayas": 7})
+        with self.assertRaises(ValueError):
+            d.BudgetedHTTP({"Adzuna": 1})
+
+    def test_provider_queries_and_429_abort_only_rate_limited_provider(self):
+        session = FakeSession([
+            FakeResponse(429),  # stop Himalayas after first query
+            FakeResponse(200, {"success": True, "jobs": []}),  # Jobicy Europe
+            FakeResponse(200, {"success": True, "jobs": []}),  # Jobicy worldwide
+        ])
+        http = d.BudgetedHTTP({"Arbeitnow": 0, "Remotive": 0, "Adzuna": 0,
+                               "Himalayas": 6, "Jobicy": 2}, session)
+        _, _, errors = d.collect(http)
+        self.assertEqual(http.calls["Himalayas"], 1)
+        self.assertEqual(http.calls["Jobicy"], 2)
+        self.assertEqual(session.calls[1][1]["params"], {"count": 200, "geo": "europe"})
+        self.assertEqual(session.calls[2][1]["params"], {"count": 200, "geo": "anywhere"})
+        self.assertTrue(any("429" in e for e in errors))
+        self.assertEqual(http.request_log[0]["outcome"], 429)
+
+    def test_employer_relocation_never_becomes_greece_strong_match(self):
+        relocation = {**JOB, "location": "Berlin", "remote": False,
+                      "precheck_eligibility": "uncertain"}
+        self.assertEqual(d.preliminary_eligibility(relocation)[0], "uncertain")
+        assessed = ev.classify(dict(VALID, fit_score=99), relocation)
+        self.assertEqual(assessed["decision"], "Review")
+
+    def test_exclusion_audit_preserves_description_excerpt(self):
+        record = {**JOB, "job_title": "Executive Chef", "source_query": "geo:europe:all",
+                  "job_description": "Prepare dinners and supervise restaurant kitchen."}
+        a = []
+        d.screen_candidates([record], a)
+        self.assertIn("restaurant kitchen", a[0]["description_excerpt"])
+        self.assertEqual(a[0]["source_query"], "geo:europe:all")
+        with tempfile.TemporaryDirectory() as td:
+            path = d.write_screening_audit(Path(td) / "run.json", a)
+            import csv
+            row = next(csv.DictReader(path.open(encoding="utf-8-sig")))
+            self.assertIn("restaurant kitchen", row["description_excerpt"])
 
 
 if __name__ == "__main__":
