@@ -231,7 +231,7 @@ def publish_pilot(jobs, details):
             job.get("precheck_reason", ""), job.get("role_evidence_reason", ""),
             "Yes" if job["job_description"] else "No",
             "Yes" if item["seen_before"] else "No",
-            "Yes" if item["known_in_ray"] else "No",
+            "Not checked" if item["known_in_ray"] is None else ("Yes" if item["known_in_ray"] else "No"),
             "Review" if item["possible_duplicate"] else "",
             old_row[18] if len(old_row) > 18 and old_row[18] else "New",
             old_row[19] if len(old_row) > 19 else "",
@@ -295,15 +295,21 @@ def main(args):
                                 else "jobspy_discovery_history.local.json")
     own_before = load_history(own_history_file)
     ray_history = load_history(args.baseline_history) if args.baseline_history else {}
-    known = {canonical_url(url) for url in ray_history}
+    known = {canonical_url(url) for url in ray_history} if args.baseline_history else None
+    ray_names = {(clean_token(r.get("company")), clean_token(r.get("title")))
+                 for r in ray_history.values() if isinstance(r, dict)}
     dupes = possible_crossboard_duplicates(unique)
     details = {}
     for job in unique:
         url = job["job_url"]
         details[url] = {
             "seen_before": url in own_before,
-            "known_in_ray": url in known,
+            "known_in_ray": (url in known) if known is not None else None,
             "possible_duplicate": url in dupes,
+            "possible_ray_match": (
+                (clean_token(job["company_name"]), clean_token(job["job_title"])) in ray_names
+                and url not in known
+            ) if known is not None else None,
         }
     for row in audit:
         row.update(details.get(row["job_url"], {}))
@@ -354,7 +360,12 @@ def main(args):
         "pending": len(pending), "screen": screen_counts,
         "rejections": rejected,
         "with_description": sum(bool(j["job_description"]) for j in unique),
-        "known_in_ray_by_exact_url": sum(d["known_in_ray"] for d in details.values()),
+        "known_in_ray_by_exact_url": (
+            sum(bool(d["known_in_ray"]) for d in details.values()) if known is not None else None
+        ),
+        "possible_ray_matches_company_title_only": (
+            sum(bool(d["possible_ray_match"]) for d in details.values()) if known is not None else None
+        ),
         "new_by_exact_url_vs_supplied_ray_history": (
             sum(not d["known_in_ray"] for d in details.values()) if args.baseline_history else None
         ),
