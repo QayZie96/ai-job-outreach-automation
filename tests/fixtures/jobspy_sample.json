@@ -1,0 +1,58 @@
+[
+  {
+    "site": "indeed",
+    "id": "GRC-101",
+    "title": "E-commerce Operations Coordinator",
+    "company": "Pilot Example A",
+    "city": "Athens",
+    "country": "Greece",
+    "is_remote": true,
+    "job_url": "https://example.com/jobs/grc-101",
+    "date_posted": "2026-10-15",
+    "description": "Coordinate ecommerce marketplace product catalogues, pricing changes, seller onboarding, operational process improvement, Excel reporting, vendor communications, and inventory reconciliations across remote teams."
+  },
+  {
+    "site": "linkedin",
+    "id": "2020201",
+    "title": "Catalog Operations Specialist",
+    "company": "Pilot Example B",
+    "city": "Lisbon",
+    "country": "Portugal",
+    "is_remote": true,
+    "job_url": "https://www.linkedin.com/jobs/view/2020201/",
+    "description": "Manage product data taxonomy, catalog listings, product information, supplier onboarding, and reporting for marketplace operations. Remote for applicants located in Portugal only."
+  },
+  {
+    "site": "indeed",
+    "id": "GRC-102",
+    "title": "Senior Software Engineer",
+    "company": "Pilot Example C",
+    "city": "Athens",
+    "country": "Greece",
+    "is_remote": true,
+    "job_url": "https://example.com/jobs/grc-102",
+    "description": "Develop distributed web services in Kotlin."
+  },
+  {
+    "site": "linkedin",
+    "id": "2020202",
+    "title": "Operations Coordinator",
+    "company": "Pilot Example D",
+    "city": "Athens",
+    "country": "Greece",
+    "is_remote": true,
+    "job_url": "https://www.linkedin.com/jobs/view/2020202",
+    "description": "Mandatory fluent German is required. Coordinate workflows and supplier communication."
+  },
+  {
+    "site": "linkedin",
+    "id": "2020203",
+    "title": "E-commerce Operations Coordinator",
+    "company": "Pilot Example A",
+    "city": "Athens",
+    "country": "Greece",
+    "is_remote": true,
+    "job_url": "https://www.linkedin.com/jobs/view/2020203",
+    "description": "Manage ecommerce catalogue, vendors and pricing. Process improvement across European markets."
+  }
+]
