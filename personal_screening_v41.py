@@ -6,6 +6,7 @@ This is deterministic triage rather than proof of hiring eligibility.
 from __future__ import annotations
 
 import csv
+import hashlib
 from datetime import datetime, timezone
 import html
 import json
@@ -226,63 +227,155 @@ def replay_audit(audit_path: str | Path, report_path: str | Path | None = None,
             "transitions": transitions}
 
 
-def update_history(history_path: str | Path, jobs: list[dict], timestamp: str | None = None) -> dict:
-    """Private local observation history; not-seen != closed, and not applied.
+def load_history(history_path: str | Path) -> dict:
+    path = Path(history_path)
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(data, dict):
+        raise ValueError("Invalid history file")
+    return data
 
-    Each invocation stores only screened candidates, not every unrelated job;
-    updates are atomic. Caller provides current run's observations only.
-    """
+
+def _atomic_history(path: Path, records: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temp.write_text(json.dumps(records, indent=2, ensure_ascii=False, sort_keys=True),
+                        encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def _posting_fingerprint(job: dict) -> str:
+    """Stable across complete descriptions and matching first-2500-character audit excerpts."""
+    title = str(job.get("job_title") or job.get("title") or "").strip().lower()
+    description = _clean(job.get("job_description") or job.get("description_excerpt") or "")[:2500].lower()
+    return hashlib.sha256((title + "\n" + description).encode("utf-8")).hexdigest()
+
+
+def pending_for_review(history: dict, job: dict) -> bool:
+    """Seen is not judged. Explicit user decisions and completed AI reviews are terminal."""
+    old = history.get(str(job.get("job_url") or ""), {})
+    return (old.get("review_status", "pending") not in ("reviewed", "dismissed", "applied")
+            and not old.get("ai_judged", False))
+
+
+def mark_review(history_path: str | Path, url: str, status: str) -> dict:
+    """Only an explicit local command can mark or reset a human review decision."""
+    if status not in ("pending", "reviewed", "dismissed", "applied"):
+        raise ValueError("Invalid review status")
+    history_path = Path(history_path)
+    data = load_history(history_path)
+    if url not in data:
+        raise ValueError("Unknown job URL; seed or collect the job first")
+    rec = data[url]
+    rec["review_status"] = status
+    rec["reviewed_at"] = (datetime.now(timezone.utc).isoformat()
+                          if status != "pending" else None)
+    if status == "pending":
+        rec["ai_judged"] = False
+        rec["ai_judged_at"] = None
+        rec["content_updated_since_review"] = False
+    _atomic_history(history_path, data)
+    return {"job_url": url, "review_status": status}
+
+
+def update_history(history_path: str | Path, jobs: list[dict],
+                   timestamp: str | None = None, evaluated_urls=None) -> dict:
+    """Remember observed postings and review decisions; absence does not imply closure."""
     dest = Path(history_path)
     timestamp = timestamp or datetime.now(timezone.utc).isoformat()
-    previous = json.loads(dest.read_text(encoding="utf-8")) if dest.exists() else {}
-    if not isinstance(previous, dict): raise ValueError("Invalid history file")
+    previous = load_history(dest)
+    evaluated_urls = set(evaluated_urls or [])
     present = set()
+    new_count = 0
     for job in jobs:
         url = str(job.get("job_url") or "")
         parsed = urlsplit(url)
-        if parsed.scheme not in {"https", "http"} or not parsed.netloc: continue
+        if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+            continue
         present.add(url)
         old = previous.get(url, {})
-        previous[url] = {"url": url, "source": str(job.get("source", "")),
-                         "company": str(job.get("company_name", "")),
-                         "title": str(job.get("job_title", "")),
-                         "first_seen": old.get("first_seen", timestamp),
-                         "last_seen": timestamp,
-                         "last_seen_in_provider_run": timestamp,
-                         "status": "seen_in_feed_unverified_open",
-                         "geography_status": str(job.get("precheck_eligibility", "uncertain")),
-                         "manual_review_only": bool(job.get("review_only", True)),
-                         "requires_manual_recheck": True}
+        if not old:
+            new_count += 1
+        fingerprint = _posting_fingerprint(job)
+        old_fp = old.get("content_fingerprint")
+        changed = bool(old_fp and old_fp != fingerprint)
+        ai_judged = bool(old.get("ai_judged", False) or url in evaluated_urls)
+        previous[url] = {
+            **old,
+            "url": url,
+            "source": str(job.get("source") or old.get("source", "")),
+            "company": str(job.get("company_name") or job.get("company") or old.get("company", "")),
+            "title": str(job.get("job_title") or old.get("title", "")),
+            "first_seen": old.get("first_seen", timestamp),
+            "last_seen": timestamp,
+            "last_seen_in_provider_run": timestamp,
+            "status": "seen_in_feed_unverified_open",
+            "geography_status": str(job.get("precheck_eligibility") or job.get("eligibility") or "uncertain"),
+            "manual_review_only": bool(job.get("review_only", True)),
+            "requires_manual_recheck": True,
+            "review_status": old.get("review_status", "pending"),
+            "reviewed_at": old.get("reviewed_at"),
+            "ai_judged": ai_judged,
+            "ai_judged_at": timestamp if url in evaluated_urls else old.get("ai_judged_at"),
+            "content_fingerprint": fingerprint,
+            "content_updated_since_review": bool(
+                old.get("content_updated_since_review", False) or
+                (changed and (old.get("review_status") in
+                 ("reviewed", "dismissed", "applied") or old.get("ai_judged")))
+            ),
+        }
     for url, old in previous.items():
         if url not in present:
             old["status"] = "not_seen_in_latest_run_status_unknown"
             old["requires_manual_recheck"] = True
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    temp = dest.with_suffix(dest.suffix + ".tmp")
-    try:
-        with temp.open("w", encoding="utf-8") as fh:
-            json.dump(previous, fh, indent=2, ensure_ascii=False, sort_keys=True)
-        os.replace(temp, dest)
-    finally:
-        if temp.exists(): temp.unlink()
-    return {"tracked": len(previous), "seen_this_run": len(present),
-            "not_seen_this_run_status_unknown": len(previous) - len(present)}
+    _atomic_history(dest, previous)
+    return {"tracked": len(previous), "new_in_history": new_count,
+            "seen_this_run": len(present),
+            "not_seen_this_run_status_unknown": len(previous) - len(present),
+            "already_judged": sum(not pending_for_review(previous, j) for j in jobs)}
+
+
 
 def _main():
     import argparse
-    parser = argparse.ArgumentParser(description="Offline frozen-audit replay and private history seeding; never calls an API.")
-    parser.add_argument("--audit", help="Frozen screening audit CSV (one row per job URL)")
-    parser.add_argument("--report", help="Matching collect-only JSON report, supplies full retained descriptions")
-    parser.add_argument("--output", help="Write replay decisions as CSV")
+    parser = argparse.ArgumentParser(description="Offline candidate screening, observation history, and manual review state; never calls job APIs.")
+    parser.add_argument("--audit", help="Frozen screening audit CSV for replay")
+    parser.add_argument("--report", help="Matching collect-only report, for description evidence or observation timestamp")
+    parser.add_argument("--output", help="Write replay decisions to CSV")
     parser.add_argument("--seed-reports", nargs="+", metavar="JSON",
-                        help="Prior collect-only reports, oldest first, to seed local history")
+                        help="Oldest-to-newest collect-only reports to seed history")
+    parser.add_argument("--seed-audit", help="Seed ALL screened URL observations from an audit CSV")
+    parser.add_argument("--mark-url", help="Previously observed job URL to mark")
+    parser.add_argument("--status", choices=("pending", "reviewed", "dismissed", "applied"),
+                        help="Human decision; pending explicitly reopens an existing job")
     parser.add_argument("--history", default="personal_discovery_history.local.json")
     args = parser.parse_args()
-    if bool(args.audit) == bool(args.seed_reports):
-        parser.error("Pass either --audit or --seed-reports")
+    mode_count = sum(bool(x) for x in (args.audit, args.seed_reports, args.seed_audit, args.mark_url))
+    if mode_count != 1:
+        parser.error("Choose exactly one of --audit, --seed-reports, --seed-audit, --mark-url")
     if args.audit:
         result = replay_audit(args.audit, args.report, args.output)
         print(json.dumps({k: v for k, v in result.items() if k != "transitions"}, indent=2))
+    elif args.mark_url:
+        if not args.status:
+            parser.error("--mark-url requires --status")
+        print(json.dumps(mark_review(args.history, args.mark_url, args.status), indent=2))
+    elif args.seed_audit:
+        run_timestamp = None
+        if args.report:
+            run_timestamp = json.loads(Path(args.report).read_text(encoding="utf-8")).get("run_utc")
+        with Path(args.seed_audit).open(newline="", encoding="utf-8-sig") as fh:
+            rows = list(csv.DictReader(fh))
+        jobs = [{"job_url": r["job_url"], "source": r.get("source", ""),
+                 "job_title": r.get("job_title", ""), "company_name": r.get("company", ""),
+                 "description_excerpt": r.get("description_excerpt", ""),
+                 "eligibility": r.get("eligibility", "uncertain"),
+                 "review_only": r.get("screen_outcome") != "candidate"}
+                for r in rows]
+        print(json.dumps(update_history(args.history, jobs, run_timestamp), indent=2))
     else:
         for p in args.seed_reports:
             raw = json.loads(Path(p).read_text(encoding="utf-8"))
