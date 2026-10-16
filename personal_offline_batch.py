@@ -179,7 +179,10 @@ def run(input_path, history_path, output_path, limit=20, include_review=8, evalu
         "collection_run_utc": report.get("run_utc"),
         "source_fetched": report.get("source_fetched", {}),
         "source_http_attempts": {"Arbeitnow": 0, "Remotive": 0, "Himalayas": 0, "Jobicy": 0},
-        "errors": [] if not ai_stats.get("failed_batches") else ["Gemini batch failed; check console"],
+        "errors": [] if not ai_stats.get("failed_batches") else [
+            f"Gemini batch failed: {detail['stage']} — {detail['error_type']}"
+            for detail in ai_stats.get("failure_details", [])
+        ] or ["Gemini batch failed; see evaluation.failure_details"],
         "evaluation": {**ai_stats, "selection": stats, "offline_from_saved_report": True},
         "evaluated_jobs": list(previous_scored.values()),
     }
