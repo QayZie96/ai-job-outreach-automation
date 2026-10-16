@@ -48,9 +48,23 @@ try {
 
     # Keep report at root: changing its directory would also change the
     # location of the durable, gitignored discovery-history file.
-    & $python personal_discovery.py --live --write-sheet 2>&1 |
-        Tee-Object -FilePath $logFile
+    # Windows PowerShell 5.1 turns Python's stderr warnings into red
+    # NativeCommandError records when piped via 2>&1. Keep stderr in a
+    # separate file and preserve it in the log without treating it as failure.
+    $stderrFile = Join-Path $logFolder ("ray-" + $stamp + "-stderr.log")
+    & $python personal_discovery.py --live --write-sheet 2> $stderrFile |
+        Tee-Object -FilePath $logFile -Append
     $exitCode = $LASTEXITCODE
+    if ((Test-Path -LiteralPath $stderrFile) -and
+        (Get-Item -LiteralPath $stderrFile).Length -gt 0) {
+        Add-Content -LiteralPath $logFile -Value (
+            "=== Python stderr (warnings or errors) ===" + [Environment]::NewLine +
+            (Get-Content -LiteralPath $stderrFile -Raw)
+        )
+        if ($exitCode -ne 0) {
+            Write-Warning "Python reported an error; details saved in $logFile"
+        }
+    }
     if ($exitCode -ne 0) { throw "Personal discovery failed (exit $exitCode). See $logFile" }
 
     & $python -c "import json,sys; d=json.load(open('personal_run.json',encoding='utf-8')); e=d.get('evaluation',{}); n=e.get('failed_batches',0); print('Summary: '+str(len(d.get('evaluated_jobs',[])))+' jobs, '+str(e.get('gemini_calls',0))+' Gemini calls, '+str(n)+' failed batches'); sys.exit(1 if n else 0)" 2>&1 |
