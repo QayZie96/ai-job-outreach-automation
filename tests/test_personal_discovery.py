@@ -545,8 +545,12 @@ class Tests(unittest.TestCase):
                 result.execute.return_value = {"values": [sheet.SHEET_HEADERS]}
             elif kwargs["range"].startswith("'Run Summary'!"):
                 result.execute.return_value = {"values": [sheet.RUN_HEADERS]}
-            elif kwargs["range"].endswith("!A2"):
+            elif kwargs["range"].endswith("!A2") or kwargs["range"].endswith("!D2"):
                 result.execute.return_value = {"values": []}
+            elif kwargs["range"].endswith("!C2"):
+                result.execute.return_value = {"values": [[sheet.VIEW_TITLE_FORMULA]]}
+            elif kwargs["range"].endswith("!A1:AA1"):
+                result.execute.return_value = {"values": [sheet.SHEET_HEADERS]}
             else:
                 result.execute.return_value = {"values": [["Header"]]}
             return result
@@ -616,6 +620,17 @@ class Tests(unittest.TestCase):
         api.batchUpdate.reset_mock()
         sheet._extend_evaluations_table(svc, "PERSONAL_TEST", 16)
         api.batchUpdate.assert_not_called()
+
+    def test_job_title_formula_quotes_and_destination(self):
+        f = sheet._job_title_formula(5, 'A "quoted" job title')
+        self.assertEqual(f, '=IF(N5="","",HYPERLINK(N5,"A ""quoted"" job title"))')
+
+    def test_dynamic_views_have_two_query_spills_and_linked_titles(self):
+        for name, formulas in sheet.VIEW_FORMULAS.items():
+            self.assertEqual(set(formulas), {"A2", "D2"})
+            self.assertIn("CHOOSECOLS(q,1,2)", formulas["A2"])
+            self.assertIn("CHOOSECOLS(q,4,5,6", formulas["D2"])
+        self.assertIn("HYPERLINK(N2", sheet.VIEW_TITLE_FORMULA)
 
     def test_broader_role_families_reach_manual_review(self):
         for title in ("CRM & Retention Manager", "Marketing Event Manager - EMEA",
