@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 MODEL = os.getenv("PERSONAL_GEMINI_MODEL", "gemini-3.5-flash-lite")
-BATCH_SIZE = 20
+BATCH_SIZE = 5  # small unattended batches reduce 503 failure blast radius
 ROOT = Path(__file__).resolve().parent
 PROMPT_FILE = ROOT / "prompts" / "personal_fit_prompt.txt"
 CACHE_PATH = ROOT / "validation_cache.db"  # same database/table as the RAY validator
