@@ -39,3 +39,7 @@ personal_*_screening_audit.csv
 # Private persistent discovery history and offline calibration outputs
 personal_discovery_history.local.json
 personal_run*_replay.csv
+
+# Isolated JobSpy pilot state and configuration
+!.env.jobspy.example
+jobspy_state/
