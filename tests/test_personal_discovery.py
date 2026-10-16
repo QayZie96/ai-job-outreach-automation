@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -142,6 +143,32 @@ class Tests(unittest.TestCase):
             ev.parse_batch([dict(VALID, fit_score=101)], [JOB])
         with self.assertRaises(ValueError):
             ev.parse_batch([dict(VALID, fit_score=True)], [JOB])
+
+    def test_cache_closes_sqlite_connections(self):
+        class TrackedConnection(sqlite3.Connection):
+            closed_explicitly = False
+
+            def close(self):
+                self.closed_explicitly = True
+                return super().close()
+
+        actual_connect = sqlite3.connect
+        opened = []
+
+        def tracked_connect(*args, **kwargs):
+            conn = actual_connect(*args, factory=TrackedConnection, **kwargs)
+            opened.append(conn)
+            return conn
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(ev.sqlite3, "connect", side_effect=tracked_connect):
+                cache = ev.PersonalCache(Path(td) / "db.sqlite")
+                fp = ev.fingerprint(JOB, "profile", "prompt")
+                self.assertIsNone(cache.get(JOB, fp))
+                cache.put(JOB, fp, ev.classify(dict(VALID), JOB))
+                self.assertEqual(cache.get(JOB, fp)["fit_score"], 83)
+                self.assertTrue(opened)
+                self.assertTrue(all(conn.closed_explicitly for conn in opened))
 
     def test_cache_versions_job_profile_and_prompt_and_segregation(self):
         with tempfile.TemporaryDirectory() as td:

@@ -5,6 +5,7 @@ CV data are committed: PERSONAL_PROFILE_PATH refers to a private local file.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -62,8 +63,16 @@ class PersonalCache:
                 result_json TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
 
+    @contextmanager
     def _connect(self):
-        return sqlite3.connect(self.path)
+        # sqlite3.Connection.__exit__ commits/rolls back but does NOT close.
+        # Explicit closure is necessary for Windows temporary-file cleanup.
+        connection = sqlite3.connect(self.path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def get(self, job, fp):
         key = cache_key(job)
