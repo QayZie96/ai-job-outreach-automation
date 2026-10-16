@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from personal_evaluation import Evaluator, PersonalCache, profile_text
+from personal_screening_v41 import calibrated_factors, update_history
 
 BASE = Path(__file__).resolve().parent
 ARBEITNOW = "https://www.arbeitnow.com/api/job-board-api"
@@ -658,20 +659,38 @@ def screen_candidates(jobs, audit=None):
     survivors, counts, rejects = [], Counter(), Counter()
     for job in jobs:
         role_score, role_reason = role_evidence(job)
+        factors = calibrated_factors(job.get("job_title", ""), description_text(job))
+        title_text = str(job.get("job_title") or "")
+        # Salvage only plausible business/marketing/admin work; never engineers,
+        # architects, unrelated professions or internships via company boilerplate.
+        if (role_score == 0 and role_reason == "insufficient operational role evidence"
+                and factors["promote_review"]
+                and not OUT_OF_SCOPE_TITLE.search(title_text)
+                and not re.search(r"\\b(?:engineer|architect|developer|intern|internship)\\b",
+                                  title_text, re.IGNORECASE)):
+            role_score, role_reason = 18, "transferable role with duties evidence (review only)"
         status, reason = preliminary_eligibility(job) if role_score else ("not_checked", "role excluded before eligibility check")
+        if role_score and factors["hard_exclusion"] == "mandatory_language":
+            status, reason = "ineligible", factors["reason"] + " required by posting"
+
         senior_executive = bool(re.search(r"\b(?:director|head of|vice president|vp|chief of staff)\b",
                                           str(job.get("job_title") or ""), re.IGNORECASE))
         title = str(job.get("job_title") or "").lower()
         # Keep adjacent marketing/data/web opportunities visible; don't promote
         # them into an AI shortlist on generic company-description matches.
         transferable_only = _has_any(title, TRANSFERABLE_REVIEW_TITLES) and not _has_any(title, ROLE_TERMS)
-        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only))
+        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only or factors["force_review"]))
         outcome = "review_only" if exploratory else "candidate"
         if not role_score:
             counts["role_out_of_scope"] += 1
             outcome = "role_out_of_scope"
+        elif factors["hard_exclusion"] == "incompatible_role":
+            counts["incompatible_role_excluded"] += 1
+            outcome = "incompatible_role_excluded"
+            reason = factors["reason"]
+            status = "ineligible"
         elif status == "ineligible":
-            key = "mandatory_language" if reason.startswith("Mandatory") else "geography"
+            key = "mandatory_language" if reason.startswith(("Mandatory", "Advanced mandatory")) else "geography"
             counts[key + "_excluded"] += 1
             rejects[(job.get("source", ""), key)] += 1
             outcome = key + "_excluded"
@@ -680,7 +699,10 @@ def screen_candidates(jobs, audit=None):
             job["precheck_reason"] = reason
             job["role_evidence_reason"] = role_reason
             job["review_only"] = exploratory
-            job["priority"] = candidate_priority(job)
+            job["priority"] = candidate_priority(job) + factors["priority_delta"]
+            if role_reason.startswith("transferable role"):
+                job["priority"] += 18
+            job["fit_flags"] = list(factors["flags"])
             survivors.append(job)
             counts["eligible" if status == "eligible" else "uncertain"] += 1
             if exploratory:
@@ -697,6 +719,7 @@ def screen_candidates(jobs, audit=None):
                 "description_excerpt": description_text(job)[:2500],
                 "role_score": role_score,
                 "role_reason": role_reason,
+                "fit_flags": ";".join(factors["flags"]),
                 "eligibility": status,
                 "eligibility_reason": reason,
                 "screen_outcome": outcome,
@@ -713,7 +736,7 @@ def write_screening_audit(report_path, audit):
     dest.parent.mkdir(parents=True, exist_ok=True)
     fields = ("source", "company", "job_title", "location", "remote", "job_url",
               "source_query", "description_excerpt",
-              "role_score", "role_reason", "eligibility", "eligibility_reason",
+              "role_score", "role_reason", "fit_flags", "eligibility", "eligibility_reason",
               "screen_outcome", "priority", "ai_selected")
     with dest.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -806,13 +829,17 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
                   "shortlist_by_source": dict(Counter(j["source"] for j in shortlist)),
                   "shortlist_urls": [j["job_url"] for j in shortlist],
                   "screening_audit_file": str(audit_file),
-                  "audit_rows": len(audit)}
+                  "audit_rows": len(audit),
+                  "manual_review_urls": [j["job_url"] for j in candidates if j.get("review_only")]}
     if collect_only:
         completed = candidates  # preserve reviewable complete pre-AI candidate pool
     else:
         completed, ai = Evaluator(candidate_profile, PersonalCache(), max_calls=max_ai).evaluate(shortlist)
         eval_stats.update(ai)
     eval_stats["request_provenance"] = http.request_log
+    history_file = Path(report_path).with_name("personal_discovery_history.local.json")
+    eval_stats["history"] = update_history(history_file, candidates)
+    eval_stats["history_file"] = str(history_file)
     path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
     if write_sheet:
         from personal_sheets import write_personal_results
