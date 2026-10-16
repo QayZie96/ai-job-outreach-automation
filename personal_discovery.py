@@ -829,6 +829,8 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     audit_file = write_screening_audit(report_path, audit)
     candidates.sort(key=lambda j: (-j["priority"], j.get("source", ""),
                                    j.get("job_url", "")))
+    pending_candidates.sort(key=lambda j: (-j["priority"], j.get("source", ""),
+                                           j.get("job_url", "")))
     incremental = Counter((job["source"], job.get("source_query", "legacy/unknown"))
                           for job in unique)
     eval_stats = {"incremental_unique_by_query": [
@@ -847,7 +849,7 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
                   "shortlist_urls": [j["job_url"] for j in shortlist],
                   "screening_audit_file": str(audit_file),
                   "audit_rows": len(audit),
-                  "manual_review_urls": [j["job_url"] for j in candidates if j.get("review_only")]}
+                  "manual_review_urls": [j["job_url"] for j in pending_candidates if j.get("review_only")]}
     if collect_only:
         completed = pending_candidates  # prior reviewed/AI-judged jobs stay in history, not the queue
     else:
