@@ -177,7 +177,20 @@ are never scheduled, modified or used as a destination.
    to verify the live Sheet permission, provider calls and Gemini. This is a live
    manual run and consumes permitted API quota.
 
-**Daily scheduler:** In Task Scheduler → Create Task, run only when the
+**One-command scheduler install (after the first successful manual run):**
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_personal_ray_task.ps1
+# Optional after proving the daily workflow:
+# powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_personal_ray_task.ps1 -Cadence SixHourly
+```
+
+The installer registers/updates the task for the current interactive Windows
+user; it does not run the task immediately. The six-hour option schedules at
+03:00, 09:00, 15:00, and 21:00 local time. Confirm that Windows Task Scheduler
+shows one `RAY Personal Job Discovery` task rather than duplicate tasks.
+
+**Manual scheduler alternative:** In Task Scheduler → Create Task, run only when the
 user is logged on (simplest credential behavior), trigger Daily at **09:00**
 using local Windows time, and set Action → Program to
 `powershell.exe`; arguments:
