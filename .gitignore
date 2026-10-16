@@ -8,6 +8,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.env.personal.example
 credentials/
 
 # Local databases and backups
@@ -26,3 +27,8 @@ logs/
 # Development test scripts
 test_adzuna.py
 test_sheets.py
+
+# Personal candidate data and local run reports (never commit private CVs)
+profiles/*.local.txt
+personal_run*.json
+.pytest_cache/
