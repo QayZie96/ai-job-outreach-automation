@@ -542,7 +542,7 @@ class Tests(unittest.TestCase):
         def return_values(**kwargs):
             result = MagicMock()
             if kwargs["range"].startswith("'Evaluations'!"):
-                result.execute.return_value = {"values": [sheet.HEADERS]}
+                result.execute.return_value = {"values": [sheet.SHEET_HEADERS]}
             elif kwargs["range"].startswith("'Run Summary'!"):
                 result.execute.return_value = {"values": [sheet.RUN_HEADERS]}
             else:
@@ -551,9 +551,47 @@ class Tests(unittest.TestCase):
         values.get.side_effect = return_values
         sheet._setup(svc, "TEST_SPREADSHEET_ID")
         ranges = [c.kwargs["range"] for c in values.get.call_args_list]
-        self.assertIn("'Evaluations'!A1:S1", ranges)
+        self.assertIn("'Evaluations'!A1:AA1", ranges)
         self.assertIn("'Run Summary'!A1:N1", ranges)
         self.assertNotIn("'Evaluations'!1:1", ranges)
+
+    def test_human_first_sheet_mapping_and_stable_id(self):
+        job = {**JOB, "assessment": ev.classify(dict(VALID), JOB)}
+        first = sheet._sheet_row(job)
+        names = sheet.SHEET_HEADERS
+        self.assertEqual(names[:7], [
+            "Vacancy ID", "Company Name", "Job Title", "Location",
+            "Work Arrangement", "Advertised Salary", "AI Fit Score"
+        ])
+        self.assertTrue(first[0].startswith("RAY-"))
+        self.assertEqual(first[1], "Example Ltd")
+        self.assertEqual(first[2], job["job_title"])
+        self.assertEqual(first[6], 83)
+        self.assertEqual(first[7], "Untriaged")
+        existing = list(first)
+        existing[names.index("Review Status")] = "Applied"
+        existing[names.index("Notes")] = "Human note"
+        existing[names.index("Application Priority")] = "P1"
+        existing[names.index("Priority Rank")] = 4
+        result = sheet._sheet_row(job, existing)
+        self.assertEqual(result[0], first[0])
+        self.assertEqual(result[names.index("Review Status")], "Applied")
+        self.assertEqual(result[names.index("Notes")], "Human note")
+        self.assertEqual(result[names.index("Application Priority")], "P1")
+        self.assertEqual(result[names.index("Priority Rank")], 4)
+
+    def test_manual_ineligible_survives_new_sheet_mapping(self):
+        job = {**JOB, "assessment": ev.classify(dict(VALID), JOB)}
+        orig = sheet._sheet_row(job)
+        names = sheet.SHEET_HEADERS
+        orig[names.index("Eligibility")] = "ineligible"
+        orig[names.index("Decision")] = "Ineligible"
+        orig[names.index("Notes")] = "Manual eligibility correction: LATAM-only"
+        orig[names.index("Review Status")] = "Dismissed"
+        updated = sheet._sheet_row(job, orig)
+        self.assertEqual(updated[names.index("Eligibility")], "ineligible")
+        self.assertEqual(updated[names.index("Decision")], "Ineligible")
+        self.assertEqual(updated[names.index("Review Status")], "Dismissed")
 
     def test_broader_role_families_reach_manual_review(self):
         for title in ("CRM & Retention Manager", "Marketing Event Manager - EMEA",
