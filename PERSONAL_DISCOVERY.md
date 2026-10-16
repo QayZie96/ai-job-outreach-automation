@@ -8,9 +8,10 @@ This adds **personal job discovery** to the original RAY case-study repository. 
 - New official feeds: Himalayas targeted Greece-country searches (**4** HTTP attempts); Jobicy two bounded queries (**2** attempts). Responses are deduplicated by URL and source ID; no company/title-only collapse.
 - Mandatory live flags. No automation/scheduler installed.
 - Existing `validation_cache.db` table reused with namespaced personal keys, not a separate database. Fingerprint covers profile text, job details, prompt, model, and schema. Historic RAY cached values remain separate.
-- Existing RAY normalizers reused for its three sources. Original flow unchanged.
+- Existing provider field mappings are mirrored in the isolated personal collector to avoid importing the RAY Gemini-initializing runtime. Original flow unchanged.
+- Conservative pre-AI screening checks title role family, explicit mandatory foreign languages, remote Greece eligibility and EU hybrid/on-site relocation. Unknown jurisdiction is marked for **Review**, not promoted to Strong Match. Pre-AI ordering is based on transparent relevance and eligibility evidence, with source diversification and a default **40-job AI shortlist** (`PERSONAL_MAX_AI_CANDIDATES`, max 100). Collection-only still returns the complete screened-in pool.
 - One batched Gemini pass (20 jobs per request, max **5 requests**). The output includes a 0–100 *evidence fit score*, eligible/uncertain/ineligible assessment, short requirements, matched user evidence, posting evidence, gaps and reasons. Score is **not** likelihood of interview.
-- Country/location conflicts and missing supporting evidence cannot become Strong Match. `Review` retains uncertainty rather than inventing eligibility. The model receives at most 4,000 characters of each job description per call, marked truncated as needed; check full posting manually before applying.
+- Country/location conflicts, unresolved precheck eligibility and missing supporting evidence cannot become Strong Match. `Review` retains uncertainty rather than inventing eligibility. The model receives at most 4,000 characters of each job description per call, marked truncated as needed; check full posting manually before applying.
 - Rejected/low-fit results remain in SQLite; local `personal_run.json` includes the evaluated batch. The Google Sheet has one authoritative `Evaluations` tab and two formula-driven tabs (`Strong Matches`, `Review Queue`), plus `Run Summary`. Human status/notes survive re-evaluation.
 
 ## Before live use
@@ -37,7 +38,7 @@ python personal_discovery.py --live --write-sheet
 python -m unittest discover -s tests -p 'test_personal_discovery.py' -v
 ```
 
-Review `personal_run.json` for source attempts, source failures, candidates, cache hits, model calls, scores and reasons. This file may contain job descriptions and is ignored by Git. Make sure actual remote-jurisdiction eligibility and listing availability are independently confirmed before applying; original feed membership does **not** prove a vacancy is still open.
+Review `personal_run.json` for source attempts, source failures, precheck rejection counts, shortlist URLs, deferred-by-cap counts, candidates, cache hits, model calls, scores and reasons. Precheck rejections never consume Gemini calls. An API listing tagged remote may in fact be an EU hybrid office role; read the employer description, not just the feed flag. All original-provider timestamps are converted to ISO calendar dates. This file may contain job descriptions and is ignored by Git. Make sure actual remote-jurisdiction eligibility and listing availability are independently confirmed before applying; original feed membership does **not** prove a vacancy is still open.
 
 ## Acceptance gates before scheduling or JobSpy
 
@@ -48,5 +49,7 @@ Review `personal_run.json` for source attempts, source failures, candidates, cac
 - Only then decide whether the isolated `JobSpy` test adds incremental value. Do not merge experiments automatically.
 
 ### Known limitations
+
+These filters are deliberately conservative: they can miss some suitable jobs with unconventional titles, and ambiguous remote locations remain in Review. The 40-job cap is a budget guard, not a guarantee of 40 suitable vacancies; do not fill the shortlist with unrelated jobs. The regional rules and language screening are heuristics, not replacements for independently verifying the employer's posting.
 
 This patch was built from the **GitHub `main` snapshot at commit `1a80483a90cddab8d25411e51a9b2f7302ea10b1`**. It has been validated offline with mocked HTTP and Gemini responses, **not** exercised with your Gemini key or live Google Sheets. The local checkout could contain unpushed differences. Applying the patch should be done in a clean checkout based on that snapshot or reviewed for conflicts. The country rules, job board feeds, and model outputs need real-posting verification before this should be treated as a reliable job-finding service.

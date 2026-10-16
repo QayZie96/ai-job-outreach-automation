@@ -99,7 +99,8 @@ class Tests(unittest.TestCase):
                           "tags": ["Operations"], "job_types": ["contract"],
                           "source_job_id": "202", "created_at": "2026-10-15"}),
             "Adzuna": ({"id": 303, "title": "Catalog Analyst",
-                         "company": {"display_name": "C"}, "location": {"display_name": "London"},
+                         "company": {"display_name": "C"},
+                         "location": {"display_name": "London"},
                          "description": "Pricing", "redirect_url": "https://c/jobs/303",
                          "created": "2026-10-14"},
                         {"company_name": "C", "location": "London", "remote": None,
@@ -311,6 +312,103 @@ class Tests(unittest.TestCase):
             self.assertTrue(outpath.exists())
             data = json.loads(outpath.read_text())
             self.assertEqual(data["source_fetched"]["Jobicy"], 1)
+
+    def test_title_filter_rejects_description_only_engineering_and_sales_noise(self):
+        noise = dict(JOB, job_description=(
+            "Our ecommerce marketplace improves operations, catalog management, "
+            "pricing, inventory and supplier coordination through automation."
+        ))
+        for title in ("Staff Product Engineer", "Senior DevOps Engineer",
+                      "Enterprise Account Executive - DACH", "Chief Technology Officer",
+                      "Head of Product Compliance", "Senior Accounts Payable Coordinator",
+                      "Director, Global Operations Excellence", "Teamlead People Operations"):
+            with self.subTest(title=title):
+                self.assertFalse(d.target_role({**noise, "job_title": title}))
+        for title in ("Digital Enablement Specialist", "Marketplace Manager",
+                      "Commercial Operations Project Manager", "Product Data Specialist",
+                      "Pricing and Catalog Analyst", "AI Automation Specialist - Marketing & Web"):
+            with self.subTest(title=title):
+                self.assertTrue(d.target_role({**noise, "job_title": title}))
+
+    def test_geo_filter_requires_greece_for_country_restricted_remote(self):
+        j = {**JOB, "location": "Netherlands", "remote": True}
+        self.assertEqual(d.preliminary_eligibility(j)[0], "ineligible")
+        j["location"] = "Europe"
+        self.assertEqual(d.preliminary_eligibility(j)[0], "uncertain")
+        j["location"] = "Anywhere"
+        self.assertEqual(d.preliminary_eligibility(j)[0], "uncertain")
+        j["location"] = "Greece"
+        self.assertEqual(d.preliminary_eligibility(j)[0], "eligible")
+        j["source"] = "Himalayas"
+        j["location_restrictions"] = ["US", "GB"]
+        self.assertEqual(d.preliminary_eligibility(j)[0], "ineligible")
+        j["location_restrictions"] = ["GR"]
+        self.assertEqual(d.preliminary_eligibility(j)[0], "eligible")
+
+    def test_greece_in_employer_hiring_allowlist_and_eu_hybrid(self):
+        foxelli = {**JOB, "location": "", "job_description": (
+            "This job is remote EU. Currently, we are hiring in Albania, Bosnia, "
+            "Croatia, Czech Republic, Estonia, Greece, Georgia, Latvia and Portugal."
+        )}
+        self.assertEqual(d.preliminary_eligibility(foxelli)[0], "eligible")
+        hybrid = {**JOB, "location": "Netherlands", "job_description": (
+            "This role is based in our Amsterdam office in the Netherlands. "
+            "Most colleagues operate in a hybrid setup with two office days per week."
+        )}
+        eligibility, reason = d.preliminary_eligibility(hybrid)
+        self.assertEqual(eligibility, "eligible")
+        self.assertIn("relocation", reason)
+        self.assertEqual(d.preliminary_eligibility(
+            {**JOB, "remote": False, "location": "London"})[0], "ineligible")
+
+    def test_unknown_precheck_cannot_be_upgraded_by_model(self):
+        uncertain = {**JOB, "precheck_eligibility": "uncertain"}
+        result = ev.classify(dict(VALID, eligibility="eligible", fit_score=95), uncertain)
+        self.assertEqual(result["eligibility"], "uncertain")
+        self.assertEqual(result["decision"], "Review")
+        known = {**JOB, "precheck_eligibility": "eligible"}
+        result = ev.classify(dict(VALID, eligibility="eligible", fit_score=95), known)
+        self.assertEqual(result["decision"], "Strong Match")
+
+    def test_mandatory_foreign_language_but_not_preferred(self):
+        self.assertEqual(d.mandatory_other_language({**JOB, "job_description": (
+            "English is required. German is a plus, but is not required."
+        )}), None)
+        self.assertEqual(d.preliminary_eligibility({**JOB, "job_description": (
+            "Fluent German and English are required to collaborate with clients."
+        )})[0], "ineligible")
+        self.assertEqual(d.preliminary_eligibility({**JOB,
+            "job_title": "Enterprise Implementation Consultant - German Fluency"
+        })[0], "ineligible")
+        self.assertEqual(d.preliminary_eligibility({**JOB, "job_description": (
+            "Du sprichst fließend Deutsch und bringst gute Englischkenntnisse mit."
+        )})[0], "ineligible")
+
+    def test_prioritization_caps_ai_and_prevents_source_monopoly(self):
+        jobs = []
+        for source, n in (("Arbeitnow", 30), ("Himalayas", 8), ("Jobicy", 8)):
+            for i in range(n):
+                jobs.append({**JOB, "source": source, "job_url": f"https://test/{source}/{i}",
+                             "priority": 95 if source == "Arbeitnow" else 65})
+        selected = d.prioritize_candidates(jobs, 20)
+        self.assertEqual(len(selected), 20)
+        self.assertEqual(len({x["job_url"] for x in selected}), 20)
+        counts = {s: sum(j["source"] == s for j in selected)
+                  for s in ("Arbeitnow", "Himalayas", "Jobicy")}
+        self.assertLessEqual(counts["Arbeitnow"], 8)
+        self.assertGreater(counts["Himalayas"], 0)
+        self.assertGreater(counts["Jobicy"], 0)
+
+    def test_normalized_legacy_dates_not_unix_timestamps(self):
+        row = d.normalize_original("Arbeitnow", [{"title": "Operations Manager",
+                   "url": "https://example/jobs/1", "created_at": 1792151727}])[0]
+        self.assertRegex(row["created_at"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(row["created_at"], d.iso_date(1792151727))
+
+    def test_sheet_infers_eu_hybrid_from_employer_evidence(self):
+        job = {**JOB, "precheck_reason": "Employer describes EU office-based/hybrid work; relocation needed",
+               "assessment": ev.classify(dict(VALID), JOB)}
+        self.assertEqual(sheet._row(job)[3], "Hybrid / EU relocation")
 
     def test_sheet_id_guards(self):
         with patch.dict("os.environ", {"PERSONAL_GOOGLE_SHEET_ID": "12345678901234567890",

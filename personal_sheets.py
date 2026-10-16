@@ -72,7 +72,8 @@ def _row(job, existing=None):
     old += [""] * max(0, len(HEADERS) - len(old))
     return [
         job.get("job_title", ""), job.get("company_name", ""), job.get("location", ""),
-        "Remote" if job.get("remote") else "On-site / hybrid / unspecified",
+        ("Hybrid / EU relocation" if "office-based/hybrid" in job.get("precheck_reason", "")
+         else "Remote" if job.get("remote") else "On-site / hybrid / unspecified"),
         job.get("source", ""), job.get("source_job_id", ""), job.get("job_url", ""),
         job.get("created_at", ""), datetime.now(timezone.utc).date().isoformat(),
         assessment["eligibility"], assessment["fit_score"] if assessment["fit_score"] is not None else "",

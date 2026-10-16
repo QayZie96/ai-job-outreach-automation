@@ -7,9 +7,10 @@ requires a NEW personal spreadsheet ID distinct from the original RAY ID.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
+import html
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, urljoin
 
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from personal_evaluation import Evaluator, PersonalCache, profile_text
@@ -172,7 +174,7 @@ def normalize_original(source, raw):
                 "remote": original.get("remote"),
                 "tags": original.get("tags"),
                 "job_types": original.get("job_types"),
-                "created_at": original.get("created_at"),
+                "created_at": iso_date(original.get("created_at")),
             }
         elif source == "Remotive":
             category = original.get("category")
@@ -186,7 +188,7 @@ def normalize_original(source, raw):
                 "remote": True,
                 "tags": [category] if category else [],
                 "job_types": [job_type] if job_type else [],
-                "created_at": original.get("publication_date"),
+                "created_at": iso_date(original.get("publication_date")),
             }
         elif source == "Adzuna":
             company = original.get("company") or {}
@@ -200,7 +202,7 @@ def normalize_original(source, raw):
                 "remote": None,
                 "tags": [],
                 "job_types": [],
-                "created_at": original.get("created"),
+                "created_at": iso_date(original.get("created")),
             }
         else:
             raise ValueError(f"Unknown legacy job provider: {source}")
@@ -287,17 +289,265 @@ def collect(http):
     return jobs, stats, errors
 
 
+# High-precision, conservative pre-AI screening. Never use company boilerplate
+# alone to qualify a posting, and never infer language proficiency or location.
+ROLE_TERMS = (
+    "ecommerce", "e-commerce", "e commerce", "marketplace", "catalog", "catalogue",
+    "merchandis", "product data", "product information", "product content",
+    "pricing", "inventory", "procurement", "purchasing", "supplier", "vendor",
+    "fulfilment", "fulfillment", "order management", "order processing",
+    "business operations", "commercial operations", "sales operations", "revenue operations",
+    "marketing operations", "partner operations", "merchant operations", "seller operations",
+    "operations", "process improvement", "process excellence", "workflow",
+    "automation specialist", "automation manager", "automation coordinator",
+    "implementation", "digital enablement", "business analyst", "business systems",
+    "category manager", "supply chain", "omnichannel", "retail trade",
+    "seller success", "partner success", "customer operations", "business enablement",
+)
+# Roles whose terminology often overlaps with marketplace/operations content, but
+# whose actual day-to-day work is another profession.
+OUT_OF_SCOPE_TITLE = re.compile(
+    r"\b(?:software|backend|back-end|frontend|front-end|full[ -]?stack|devops|"
+    r"site reliability|sre|cloud|platform|infrastructure|machine learning|\bml|"
+    r"data|security|mechanical|electrical|robotics|firmware|embedded|"
+    r"computer vision|network|systems|product|quality assurance|qa|test|"
+    r"solution|solutions|salesforce|ai)\s+(?:engineer|architect|developer)\b|"
+    r"\b(?:engineer|developer|architect|scientist|copywriter|videographer|"
+    r"video editor|graphic designer|product designer|\bdesigner|"
+    r"account executive|account development|sales representative|"
+    r"sales development representative|business development representative|"
+    r"account manager|clinical|medical|nurse|lawyer|legal counsel|"
+    r"tax manager|payroll|accountant|underwriter|auditor|accounts payable|finance specialist|"
+    r"chief technology officer|chief operating officer|chief of staff|"
+    r"chief executive|vice president|\bvp\b|director(?: of|,|\b)|head of|"
+    r"intern|internship|werkstudent|working student|stage\b|"
+    r"apprentice|praktikum)\b",
+    re.IGNORECASE,
+)
+GENERIC_TITLE = re.compile(
+    r"\b(?:specialist|analyst|coordinator|associate|project manager|program manager|"
+    r"programme manager|consultant|advisor|manager)\b", re.IGNORECASE
+)
+STRONG_DESCRIPTION_SIGNALS = (
+    "ecommerce", "e-commerce", "marketplace", "product data", "product information",
+    "catalog", "catalogue", "inventory", "supplier", "vendor", "merchandis",
+    "pricing", "fulfillment", "fulfilment", "order management", "procurement",
+    "workflow automation", "process automation", "operations management",
+)
+NON_ENGLISH_LANGUAGE = (
+    "german", "french", "dutch", "spanish", "italian", "portuguese", "polish",
+    "swedish", "danish", "norwegian", "finnish", "turkish", "arabic", "japanese",
+)
+EU_COUNTRIES = (
+    "austria", "belgium", "bulgaria", "croatia", "cyprus", "czechia", "czech republic",
+    "denmark", "estonia", "finland", "france", "germany", "greece", "hungary",
+    "ireland", "italy", "latvia", "lithuania", "luxembourg", "malta",
+    "netherlands", "poland", "portugal", "romania", "slovakia", "slovenia",
+    "spain", "sweden",
+)
+EU_CITIES = (
+    "athens", "thessaloniki", "berlin", "munich", "münchen", "hamburg",
+    "frankfurt", "cologne", "stuttgart", "bonn", "amsterdam", "rotterdam",
+    "utrecht", "paris", "bordeaux", "lyon", "nantes", "madrid", "barcelona",
+    "lisbon", "porto", "dublin", "warsaw", "krakow", "prague", "vienna",
+    "rome", "milan", "brussels", "stockholm", "copenhagen", "helsinki",
+    "budapest", "bucharest", "sofia", "tallinn", "riga", "vilnius",
+)
+NON_EU_LOCATIONS = (
+    "united kingdom", "uk", "london", "manchester", "bristol", "leeds", "oxford",
+    "cambridge", "england", "scotland", "switzerland", "zurich", "zürich",
+    "lausanne", "geneva", "nyon", "zug", "usa", "united states", "canada",
+    "latam", "australia", "serbia", "norway", "israel", "india", "japan",
+)
+BROAD_REMOTE = ("worldwide", "anywhere", "global", "fully global", "work from anywhere")
+BROAD_REGION = ("europe", "emea", "european union", "eu", "eea")
+
+
+def _has_phrase(text, phrase):
+    return bool(re.search(r"(?<![\w])" + re.escape(phrase) + r"(?![\w])", text))
+
+
+def _has_any(text, phrases):
+    return any(_has_phrase(text, phrase) for phrase in phrases)
+
+
+def description_text(job):
+    # HTML/script content is not job responsibility evidence. Limit the
+    # expensive parsing and avoid scanning unrelated footer boilerplate.
+    raw = str(job.get("job_description") or "")[:25000]
+    return " ".join(BeautifulSoup(html.unescape(raw), "html.parser").stripped_strings)[:12000].lower()
+
+
+def title_relevance(job):
+    title = " ".join(str(job.get("job_title") or "").lower().split())
+    if not title or OUT_OF_SCOPE_TITLE.search(title):
+        return 0
+    if _has_any(title, ("people operations", "hr operations", "human resources", "data center")):
+        return 0
+    matched = [t for t in ROLE_TERMS if _has_phrase(title, t)]
+    if matched:
+        major = ("ecommerce", "e-commerce", "e commerce", "marketplace", "catalog",
+                 "catalogue", "product data", "product information", "pricing", "inventory")
+        return 78 if _has_any(title, major) else 65
+    # A generic title needs specific domain signals, not incidental words
+    # such as "operations" or "product" in employer descriptions.
+    if GENERIC_TITLE.search(title):
+        desc = description_text(job)
+        signals = {term for term in STRONG_DESCRIPTION_SIGNALS if _has_phrase(desc, term)}
+        if len(signals) >= 3:
+            return 28
+    return 0
+
+
 def target_role(job):
-    title = re.sub(r"\s+", " ", str(job.get("job_title") or "").lower())
-    if not title:
-        return False
-    if any(term in title for term in TARGET_TERMS):
-        return True
-    # A generic title can still hide a genuine operational role. Require two
-    # distinct signals from the description to avoid flooding Gemini.
-    description = re.sub(r"<[^>]+>", " ", str(job.get("job_description") or "").lower())[:10000]
-    signals = {term for term in TARGET_TERMS if term in description}
-    return len(signals) >= 2
+    return title_relevance(job) > 0
+
+
+def mandatory_other_language(job):
+    desc = description_text(job)
+    title = str(job.get("job_title") or "").lower()
+    for language in NON_ENGLISH_LANGUAGE:
+        l = re.escape(language)
+        # Require affirmative mandatory language evidence. Mentions of a
+        # market, country or "German preferred" do not justify rejection.
+        patterns = (
+            rf"\b(?:fluent|fluency|native|business fluent|professional proficiency)\s+(?:in\s+)?{l}\b",
+            rf"\b{l}\s+(?:language\s+)?(?:fluency|proficiency)\s+(?:is\s+)?(?:required|mandatory|essential)\b",
+            rf"\b(?:must|need|required)\s+(?:to\s+)?(?:speak|write|understand)\s+{l}\b",
+            rf"\b(?:c1|c2)\s+(?:level\s+)?{l}\b",
+        )
+        if any(re.search(p, desc) for p in patterns) or re.search(
+                rf"\b{l}\s+(?:fluency|required|speaking)\b|\bfluent\s+(?:in\s+)?{l}\b|"
+                rf"\b{l}[ -]speaking\b", title):
+            return language
+    # Explicit mandatory proficiency in German found in local-language postings.
+    if re.search(
+        r"\b(?:fließend|fliessend|sehr gut|hervorragend|verhandlungssicher)"
+        r".{0,35}\bdeutsch(?:kenntnisse)?\b|"
+        r"\b(?:fließende|fliessende|verhandlungssichere|gute)\s+deutschkenntnisse\b|"
+        r"\bdeutsch[- ](?:und|oder)\s+(?:gute\s+)?englischkenntnisse\b",
+        desc,
+    ):
+        return "German"
+    return None
+
+
+def preliminary_eligibility(job):
+    # Only hard-reject when metadata explicitly rules out the user's location.
+    # Ambiguous locations continue as Review candidates, not Strong Matches.
+    language = mandatory_other_language(job)
+    if language:
+        return "ineligible", f"Mandatory {language} language not in verified profile"
+    restrictions = job.get("location_restrictions") or []
+    if job.get("source") == "Himalayas" and restrictions:
+        regions = {str(x).upper() for x in restrictions}
+        if not ({"GR", "GREECE"} & regions):
+            return "ineligible", "Explicit country allowlist excludes Greece"
+        return "eligible", "Greece present in provider country allowlist"
+    place = " ".join(str(job.get("location") or "").lower().split())
+    if job.get("remote"):
+        desc = description_text(job)
+        # Some remote aggregators label every role remote, even when the
+        # employer explicitly requires office presence. EU hybrid relocation
+        # is in scope; a country-restricted fully remote role is not.
+        if (_has_any(place, EU_COUNTRIES + EU_CITIES)
+                and re.search(r"\bhybrid\s+(?:setup|model|work|working)|"
+                              r"\bminimum\s+of\s+\w+\s+days?\s+per\s+week\s+in\s+the\s+office|"
+                              r"\brole\s+is\s+based\s+in\s+our\s+\w+\s+office", desc)):
+            return "eligible", "Employer describes EU office-based/hybrid work; relocation needed"
+        if _has_phrase(place, "greece") or _has_phrase(place, "athens"):
+            return "eligible", "Remote listing explicitly includes Greece"
+        if re.search(
+            r"(?:currently\s+)?(?:we\s+are\s+)?hiring\s+in.{0,350}\bgreece\b|"
+            r"(?:eligible\s+countries|locations\s+include|work\s+remotely\s+from)"
+            r".{0,350}\bgreece\b", desc,
+        ):
+            return "eligible", "Posting explicitly lists Greece as a hiring location"
+        if _has_any(place, BROAD_REMOTE):
+            return "uncertain", "Worldwide remote label; contract eligibility unverified"
+        if _has_any(place, BROAD_REGION):
+            return "uncertain", "Europe/EMEA label does not confirm hiring from Greece"
+        if _has_any(place, EU_COUNTRIES + NON_EU_LOCATIONS + EU_CITIES):
+            return "ineligible", "Remote country/location list does not include Greece"
+        return "uncertain", "Remote hiring location unspecified"
+    if _has_any(place, NON_EU_LOCATIONS):
+        return "ineligible", "On-site/hybrid location outside the EU"
+    if _has_any(place, EU_COUNTRIES + EU_CITIES):
+        return "eligible", "EU location permits relocation review"
+    return "uncertain", "On-site/hybrid location unclear"
+
+
+def candidate_priority(job):
+    score = title_relevance(job)
+    eligibility = job.get("precheck_eligibility", "uncertain")
+    score += 24 if eligibility == "eligible" else 8
+    place = str(job.get("location") or "").lower()
+    if "greece" in place or "athens" in place:
+        score += 18
+    if "junior" in str(job.get("job_title") or "").lower():
+        score += 6
+    title = str(job.get("job_title") or "").lower()
+    if "senior" in title or re.search(r"\bsr\.?\b", title):
+        score -= 9
+    if "lead" in title:
+        score -= 7
+    desc = description_text(job)
+    if re.search(r"\b(?:8\+|10\+|12\+)\s+years?\b", desc):
+        score -= 10
+    # A German-language description is not proof of a strict requirement;
+    # review it, but rank it below explicit English-language opportunities.
+    words = re.findall(r"[a-zäöüß]+", desc[:3000])
+    if len(words) >= 40 and sum(w in {"und", "der", "die", "das", "du", "deine", "mit", "wir", "bei"}
+                                 for w in words) / len(words) > 0.05:
+        score -= 25
+    if "intern" in title or "part-time" in title:
+        score -= 10
+    return score
+
+
+def prioritize_candidates(jobs, limit=40):
+    # A single provider's page order must not monopolize paid/limited AI.
+    ordered = sorted(jobs, key=lambda j: (-j["priority"], j.get("source", ""),
+                                              j.get("job_url", "")))
+    per_source = max(1, (limit * 2 + 4) // 5)  # max ~40% first pass
+    counts, selected, seen = Counter(), [], set()
+    for job in ordered:
+        if len(selected) >= limit:
+            break
+        if counts[job["source"]] < per_source:
+            selected.append(job)
+            seen.add(job["job_url"])
+            counts[job["source"]] += 1
+    for job in ordered:
+        if len(selected) >= limit:
+            break
+        if job["job_url"] not in seen:
+            selected.append(job)
+            seen.add(job["job_url"])
+    selected.sort(key=lambda j: (-j["priority"], j.get("source", ""),
+                                  j.get("job_url", "")))
+    return selected
+
+
+def screen_candidates(jobs):
+    survivors, counts, rejects = [], Counter(), Counter()
+    for job in jobs:
+        if not target_role(job):
+            counts["role_out_of_scope"] += 1
+            continue
+        status, reason = preliminary_eligibility(job)
+        if status == "ineligible":
+            key = "mandatory_language" if reason.startswith("Mandatory") else "geography"
+            counts[key + "_excluded"] += 1
+            rejects[(job.get("source", ""), key)] += 1
+            continue
+        job["precheck_eligibility"] = status
+        job["precheck_reason"] = reason
+        job["priority"] = candidate_priority(job)
+        survivors.append(job)
+        counts["eligible" if status == "eligible" else "uncertain"] += 1
+    return survivors, dict(counts), {f"{source}:{reason}": count
+                                      for (source, reason), count in sorted(rejects.items())}
 
 
 def deduplicate(jobs):
@@ -351,19 +601,29 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     http = BudgetedHTTP(limits, session)
     raw, stats, errors = collect(http)
     unique = deduplicate(raw)
-    candidates = [j for j in unique if target_role(j)]
-    eval_stats = {"unique": len(unique), "prefiltered_candidates": len(candidates)}
+    candidates, screen_stats, rejection_by_source = screen_candidates(unique)
+    selection_limit = env_int("PERSONAL_MAX_AI_CANDIDATES", 40, minimum=1, maximum=100)
+    shortlist = prioritize_candidates(candidates, selection_limit)
+    candidates.sort(key=lambda j: (-j["priority"], j.get("source", ""),
+                                   j.get("job_url", "")))
+    eval_stats = {"unique": len(unique), "prefiltered_candidates": len(candidates),
+                  "precheck": screen_stats, "rejections_by_source": rejection_by_source,
+                  "ai_shortlist_count": len(shortlist), "ai_shortlist_limit": selection_limit,
+                  "deferred_by_selection_limit": len(candidates) - len(shortlist),
+                  "shortlist_by_source": dict(Counter(j["source"] for j in shortlist)),
+                  "shortlist_urls": [j["job_url"] for j in shortlist]}
     if collect_only:
-        completed = candidates
+        completed = candidates  # preserve reviewable complete pre-AI candidate pool
     else:
-        completed, ai = Evaluator(candidate_profile, PersonalCache(), max_calls=max_ai).evaluate(candidates)
+        completed, ai = Evaluator(candidate_profile, PersonalCache(), max_calls=max_ai).evaluate(shortlist)
         eval_stats.update(ai)
     path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
     if write_sheet:
         from personal_sheets import write_personal_results
         write_personal_results(completed, stats, http.calls, errors, eval_stats)
     print(f"Personal run complete: {len(raw)} fetched, {len(unique)} unique, "
-          f"{len(candidates)} candidates, {len(completed)} evaluated/collected. "
+          f"{len(candidates)} screened candidates, {len(shortlist)} AI shortlist, "
+          f"{len(completed)} evaluated/collected. "
           f"Calls: {dict(http.calls)}. Report: {path}")
     return completed, eval_stats
 

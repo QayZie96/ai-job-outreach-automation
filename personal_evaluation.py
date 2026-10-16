@@ -120,6 +120,15 @@ def validate_result(item):
 def classify(result, job):
     """Compute category locally; the model cannot grant itself a Strong Match."""
     eligibility = result["eligibility"]
+    # A model's confidence cannot override unresolved jurisdictional evidence.
+    # Preserve uncertainty for human review unless our local check found
+    # explicit permitted country / EU hybrid-work evidence.
+    if job.get("precheck_eligibility") == "uncertain" and eligibility == "eligible":
+        eligibility = "uncertain"
+        result["main_gap_or_uncertainty"] = (
+            result.get("main_gap_or_uncertainty") or
+            "Remote hiring eligibility from Greece has not been verified"
+        )
     # Himalayas explicitly defines a nonempty country list as the only permitted countries.
     if job.get("source") == "Himalayas" and job.get("location_restrictions"):
         codes = {str(x).upper() for x in job["location_restrictions"]}
