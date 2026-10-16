@@ -80,6 +80,66 @@ class Tests(unittest.TestCase):
         self.assertEqual(j["location"], "Europe")
         self.assertEqual(j["created_at"], "2026-10-15")
 
+    def test_legacy_normalizers_do_not_import_gemini_runtime(self):
+        # Regression: collect-only must work without GEMINI_API_KEY.
+        # Importing RAY main.py initializes the old validator's Gemini client.
+        cases = {
+            "Arbeitnow": ({"id": 101, "title": "Operations Specialist", "company_name": "A",
+                           "location": "Athens", "description": "Orders", "url": "https://a/jobs/101",
+                           "remote": False, "tags": ["operations"], "job_types": ["full_time"],
+                           "created_at": "2026-10-16"},
+                          {"company_name": "A", "location": "Athens", "remote": False,
+                           "tags": ["operations"], "job_types": ["full_time"],
+                           "source_job_id": "101", "created_at": "2026-10-16"}),
+            "Remotive": ({"id": 202, "title": "Market Operations", "company_name": "B",
+                          "candidate_required_location": "Europe", "description": "Vendors",
+                          "url": "https://b/jobs/202", "category": "Operations", "job_type": "contract",
+                          "publication_date": "2026-10-15"},
+                         {"company_name": "B", "location": "Europe", "remote": True,
+                          "tags": ["Operations"], "job_types": ["contract"],
+                          "source_job_id": "202", "created_at": "2026-10-15"}),
+            "Adzuna": ({"id": 303, "title": "Catalog Analyst",
+                         "company": {"display_name": "C"}, "location": {"display_name": "London"},
+                         "description": "Pricing", "redirect_url": "https://c/jobs/303",
+                         "created": "2026-10-14"},
+                        {"company_name": "C", "location": "London", "remote": None,
+                         "tags": [], "job_types": [], "source_job_id": "303",
+                         "created_at": "2026-10-14"}),
+        }
+        with patch.dict(sys.modules, {"main": None}), patch.dict("os.environ", {"GEMINI_API_KEY": ""}):
+            for source, (raw, expected) in cases.items():
+                with self.subTest(source=source):
+                    job = d.normalize_original(source, [raw])[0]
+                    self.assertEqual(job["source"], source)
+                    self.assertEqual(job["job_title"], raw["title"])
+                    self.assertEqual(job["job_description"], raw["description"])
+                    self.assertEqual(job["source_attribution"], job["job_url"])
+                    for field, value in expected.items():
+                        self.assertEqual(job[field], value)
+
+    def test_collect_only_with_legacy_sources_and_no_gemini_key(self):
+        session = FakeSession([
+            FakeResponse(200, {"data": [{"id": 1, "title": "Ecommerce Operations",
+                                         "company_name": "A", "url": "https://a/jobs/1"}],
+                               "links": {"next": None}}),
+            FakeResponse(200, {"jobs": [{"id": 2, "title": "Marketplace Operations",
+                                         "company_name": "B", "url": "https://b/jobs/2"}]}),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "run.json"
+            with patch.dict(sys.modules, {"main": None}), patch.dict("os.environ", {
+                "GEMINI_API_KEY": "", "PERSONAL_MAX_ARBEITNOW_CALLS": "1",
+                "PERSONAL_MAX_REMOTIVE_CALLS": "1", "PERSONAL_MAX_ADZUNA_CALLS": "0",
+                "PERSONAL_MAX_HIMALAYAS_CALLS": "0", "PERSONAL_MAX_JOBICY_CALLS": "0",
+            }):
+                out, stats = d.run(collect_only=True, session=session, report_path=str(report))
+            self.assertEqual(len(out), 2)
+            self.assertEqual(stats["prefiltered_candidates"], 2)
+            self.assertEqual(len(session.calls), 2)
+            self.assertTrue(report.is_file())
+            self.assertEqual(json.loads(report.read_text())["source_http_attempts"],
+                             {"Arbeitnow": 1, "Remotive": 1})
+
     def test_canonical_url_keeps_job_identifiers_but_strips_tracking(self):
         first = "HTTPS://EXAMPLE.COM/jobs/123/?utm_source=x&jobid=99#fragment"
         self.assertEqual(d.canonical_url(first), "https://example.com/jobs/123?jobid=99")

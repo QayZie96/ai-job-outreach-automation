@@ -155,21 +155,65 @@ def normalize_jobicy(raw):
 
 
 def normalize_original(source, raw):
-    # Reuse the RAY project's existing normalization functions, not a duplicate
-    # implementation. Import lazily to avoid loading the RAY runtime in tests.
-    from main import (normalize_arbeitnow_jobs, normalize_remotive_jobs,
-                      normalize_adzuna_jobs)
-    func = {"Arbeitnow": normalize_arbeitnow_jobs,
-            "Remotive": normalize_remotive_jobs,
-            "Adzuna": normalize_adzuna_jobs}[source]
-    items = func(raw)
-    for item, original in zip(items, raw):
-        item["source_job_id"] = str(original.get("id") or "")
-        item["location_restrictions"] = []
-        item["timezone_restrictions"] = []
-        item["seniority"] = None
-        item["salary"] = ""
-        item["source_attribution"] = item.get("job_url") or ""
+    """Normalize legacy providers without importing RAY's Gemini-initializing main.py.
+
+    These field mappings match the original RAY normalizers, while the personal
+    pipeline adds its own IDs, eligibility fields and source attribution.
+    """
+    items = []
+    for original in raw:
+        if source == "Arbeitnow":
+            item = {
+                "job_title": original.get("title"),
+                "company_name": original.get("company_name"),
+                "location": original.get("location"),
+                "job_description": original.get("description"),
+                "job_url": original.get("url"),
+                "remote": original.get("remote"),
+                "tags": original.get("tags"),
+                "job_types": original.get("job_types"),
+                "created_at": original.get("created_at"),
+            }
+        elif source == "Remotive":
+            category = original.get("category")
+            job_type = original.get("job_type")
+            item = {
+                "job_title": original.get("title"),
+                "company_name": original.get("company_name"),
+                "location": original.get("candidate_required_location"),
+                "job_description": original.get("description"),
+                "job_url": original.get("url"),
+                "remote": True,
+                "tags": [category] if category else [],
+                "job_types": [job_type] if job_type else [],
+                "created_at": original.get("publication_date"),
+            }
+        elif source == "Adzuna":
+            company = original.get("company") or {}
+            location = original.get("location") or {}
+            item = {
+                "job_title": original.get("title"),
+                "company_name": company.get("display_name"),
+                "location": location.get("display_name"),
+                "job_description": original.get("description"),
+                "job_url": original.get("redirect_url"),
+                "remote": None,
+                "tags": [],
+                "job_types": [],
+                "created_at": original.get("created"),
+            }
+        else:
+            raise ValueError(f"Unknown legacy job provider: {source}")
+        item.update({
+            "source": source,
+            "source_job_id": str(original.get("id") or ""),
+            "location_restrictions": [],
+            "timezone_restrictions": [],
+            "seniority": None,
+            "salary": "",
+            "source_attribution": item.get("job_url") or "",
+        })
+        items.append(item)
     return items
 
 
