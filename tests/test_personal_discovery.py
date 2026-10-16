@@ -598,6 +598,25 @@ class Tests(unittest.TestCase):
         self.assertEqual(updated[names.index("Decision")], "Ineligible")
         self.assertEqual(updated[names.index("Review Status")], "Dismissed")
 
+    def test_extend_native_table_after_new_rows(self):
+        from unittest.mock import MagicMock
+        svc = MagicMock()
+        api = svc.spreadsheets.return_value
+        api.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"title": "Evaluations", "sheetId": 0},
+                        "tables": [{"name": "Ray_Evaluations",
+                                    "tableId": "173382529",
+                                    "range": {"endRowIndex": 16}}]}]
+        }
+        sheet._extend_evaluations_table(svc, "PERSONAL_TEST", 20)
+        request = api.batchUpdate.call_args.kwargs["body"]["requests"][0]
+        self.assertEqual(request["updateTable"]["table"]["range"]["endRowIndex"], 20)
+        self.assertEqual(request["updateTable"]["table"]["range"]["endColumnIndex"], 27)
+        self.assertEqual(request["updateTable"]["table"]["tableId"], "173382529")
+        api.batchUpdate.reset_mock()
+        sheet._extend_evaluations_table(svc, "PERSONAL_TEST", 16)
+        api.batchUpdate.assert_not_called()
+
     def test_broader_role_families_reach_manual_review(self):
         for title in ("CRM & Retention Manager", "Marketing Event Manager - EMEA",
                       "Data Analyst", "Remote Office Assistant", "Shopify Specialist",
