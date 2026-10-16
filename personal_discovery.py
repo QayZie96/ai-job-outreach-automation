@@ -666,7 +666,7 @@ def screen_candidates(jobs, audit=None):
         if (role_score == 0 and role_reason == "insufficient operational role evidence"
                 and factors["promote_review"]
                 and not OUT_OF_SCOPE_TITLE.search(title_text)
-                and not re.search(r"\\b(?:engineer|architect|developer|intern|internship)\\b",
+                and not re.search(r"\b(?:engineer|architect|developer|intern|internship)\b",
                                   title_text, re.IGNORECASE)):
             role_score, role_reason = 18, "transferable role with duties evidence (review only)"
         status, reason = preliminary_eligibility(job) if role_score else ("not_checked", "role excluded before eligibility check")
