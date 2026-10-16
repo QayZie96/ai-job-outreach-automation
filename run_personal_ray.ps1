@@ -33,6 +33,12 @@ New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $logFile = Join-Path $logFolder ("ray-" + $stamp + ".log")
 try {
+    # Fail early on a missing/unshared personal Sheet instead of consuming
+    # 11 provider requests and Gemini calls before an authentication failure.
+    & $python -c "from dotenv import load_dotenv; load_dotenv('.env'); from personal_sheets import verify_spreadsheet_destination, _service; _service().spreadsheets().get(spreadsheetId=verify_spreadsheet_destination(),fields='sheets.properties.title').execute(); print('Personal Sheet access verified')" 2>&1 |
+        Tee-Object -FilePath $logFile
+    if ($LASTEXITCODE -ne 0) { throw "Personal Sheet access check failed. Verify service account sharing. See $logFile" }
+
     # Keep report at root: changing its directory would also change the
     # location of the durable, gitignored discovery-history file.
     & $python personal_discovery.py --live --write-sheet 2>&1 |
