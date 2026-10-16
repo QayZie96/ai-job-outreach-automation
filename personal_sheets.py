@@ -152,6 +152,46 @@ def _sheet_row(job, existing=None):
     return [out.get(key, "") for key in SHEET_HEADERS]
 
 
+def _extend_evaluations_table(service, spreadsheet_id, required_end):
+    """Expand the native table after values.append adds new vacancies.
+
+    The existing dataset remains the source of truth. Formula-driven view tabs
+    stay outside native tables to preserve QUERY array-spill behavior.
+    """
+    api = service.spreadsheets()
+    metadata = api.get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title),tables(tableId,name,range))",
+    ).execute()
+    for sheet in metadata.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") != "Evaluations":
+            continue
+        for table in sheet.get("tables", []):
+            if table.get("name") != "Ray_Evaluations":
+                continue
+            span = table.get("range", {})
+            if int(span.get("endRowIndex", 0)) >= required_end:
+                return
+            api.batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"updateTable": {
+                    "table": {
+                        "tableId": table["tableId"],
+                        "range": {
+                            "sheetId": props["sheetId"],
+                            "startRowIndex": 0,
+                            "endRowIndex": required_end,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": len(SHEET_HEADERS),
+                        },
+                    },
+                    "fields": "range",
+                }}]},
+            ).execute()
+            return
+
+
 def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats):
     spreadsheet_id = verify_spreadsheet_destination()
     service = _service()
@@ -182,6 +222,8 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
         values.append(spreadsheetId=spreadsheet_id, range="'Evaluations'!A:AA",
                       valueInputOption="RAW", insertDataOption="INSERT_ROWS",
                       body={"values": pending_add}).execute()
+        _extend_evaluations_table(service, spreadsheet_id,
+                                  1 + len(current) + len(pending_add))
     # The five pilot jobs remain in Pending AI until successfully assessed.
     # Update the status, not the source posting details or user's history.
     scored_urls = {str(job.get("job_url") or "") for job in jobs if "assessment" in job}
