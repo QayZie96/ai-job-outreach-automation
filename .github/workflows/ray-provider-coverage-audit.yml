@@ -1,4 +1,4 @@
-name: RAY capped collection + screening — offline regression
+name: RAY manual review Sheet — offline regression
 
 on:
   push:
