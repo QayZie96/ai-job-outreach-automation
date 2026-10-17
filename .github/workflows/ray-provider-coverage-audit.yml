@@ -1,4 +1,4 @@
-name: RAY stage dedup manual publishing — regression
+name: RAY production Sheet isolation — regression
 
 on:
   push:
