@@ -1,5 +1,6 @@
 """Offline local state migration safety tests; never invoke live providers."""
 from pathlib import Path
+from contextlib import closing
 import json
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -9,7 +10,7 @@ import personal_local_state_migration as m
 
 
 def cache(path, rows=(), extra=False):
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute(m.CACHE_SCHEMA)
         if extra:
             db.execute("CREATE TABLE other_original_data (id TEXT PRIMARY KEY)")
@@ -88,7 +89,7 @@ class StateMigrationTests(unittest.TestCase):
         self.assertTrue(result["release_written"])
         self.assertTrue((backup / m.CACHE).exists())
         self.assertEqual((self.release / m.HISTORY).exists(), True)
-        with sqlite3.connect(self.release / m.CACHE) as db:
+        with closing(sqlite3.connect(self.release / m.CACHE)) as db, db:
             self.assertEqual(db.execute(
                 "SELECT fingerprint FROM validation_cache WHERE job_url=?",
                 ("personal-fit-v1:sample:1",)).fetchone()[0], "new")
@@ -114,7 +115,7 @@ class StateMigrationTests(unittest.TestCase):
         self.assertFalse((self.release / m.HISTORY).exists())
 
     def test_identical_timestamp_and_different_cache_blocks(self):
-        with sqlite3.connect(self.experiment / m.CACHE) as db:
+        with closing(sqlite3.connect(self.experiment / m.CACHE)) as db, db:
             db.execute(
                 "UPDATE validation_cache SET updated_at='2026-10-16 20:00:00'"
                 " WHERE job_url='personal-fit-v1:sample:1'")
