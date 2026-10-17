@@ -3,7 +3,14 @@
 No live providers, AI, Sheets, network or extra language models.
 """
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import csv
+import json
 
+import personal_sheets as sheets
+import personal_screening_v41 as screening
 import personal_discovery as d
 from personal_posting_language import unsupported_posting_language as detect
 
@@ -126,6 +133,55 @@ class PostingLanguageTests(unittest.TestCase):
         kept, count, _ = d.screen_candidates([job(GERMAN + ENGLISH * 4)])
         self.assertEqual(len(kept), 1)
         self.assertEqual(count.get("posting_language_excluded", 0), 0)
+
+    def test_frozen_manual_report_rescreens_before_sheet_write(self):
+        foreign = {**job(GERMAN * 3), "review_only": True,
+                   "job_url": "https://www.adzuna.de/details/101",
+                   "source_job_id": "101"}
+        english = {**job(ENGLISH * 3), "review_only": True,
+                   "job_url": "https://www.adzuna.de/details/102",
+                   "source_job_id": "102"}
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old_report.json"
+            path.write_text(json.dumps({
+                "evaluation": {"unique": 2}, "evaluated_jobs": [foreign, english]
+            }), encoding="utf-8")
+            with (patch.object(sheets, "verify_spreadsheet_destination", return_value="staging"),
+                  patch.object(sheets, "read_existing_evaluations",
+                               return_value={"existing_urls": set()}),
+                  patch.object(sheets, "_service", return_value=object()),
+                  patch.object(sheets, "_setup"),
+                  patch.object(sheets, "_write_manual_review", return_value={"added": 1}) as writer):
+                stats = sheets.publish_manual_only_from_report(path)
+            self.assertEqual(stats["added"], 1)
+            submitted = writer.call_args.args[2]
+            self.assertEqual([j["source_job_id"] for j in submitted], ["102"])
+
+    def test_frozen_screening_audit_replay_records_language_exclusion(self):
+        with TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "audit.csv"
+            report_path = Path(tmp) / "report.json"
+            foreign = job(GERMAN * 3)
+            report_path.write_text(json.dumps({"evaluated_jobs": [foreign]}),
+                                   encoding="utf-8")
+            with audit_path.open("w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=[
+                    "source", "company", "job_title", "job_url", "screen_outcome",
+                    "role_reason", "description_excerpt", "priority", "eligibility",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "source": "Adzuna", "company": "Sample",
+                    "job_title": "Marketplace Operations Specialist",
+                    "job_url": foreign["job_url"], "screen_outcome": "review_only",
+                    "role_reason": "target role in job title",
+                    "description_excerpt": GERMAN,
+                    "priority": 45, "eligibility": "uncertain",
+                })
+            result = screening.replay_audit(audit_path, report_path)
+            self.assertEqual(result["new"]["posting_language_excluded"], 1)
+            self.assertIn("Posting language not supported: German",
+                          result["transitions"][0]["reason"])
 
     def test_non_latin_unsupported_script_but_not_greek(self):
         arabic = ("نبحث عن شخص للعمل مع فريقنا في الشركة ونتطلع إلى التقديم "
