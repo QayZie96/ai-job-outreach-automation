@@ -79,7 +79,13 @@ If no conflicts and source states remain unchanged, apply locally:
 
 The apply path backs up any existing **release** cache and history to a uniquely timestamped private directory beneath `%LOCALAPPDATA%\PersonalRay`. It writes only the new release cache/history and never alters production or experimental sources. Do not enable the 09:00 task until the exact scheduler command/path is inspected; if the old task runs again before cutover, repeat the dry run and re-evaluate potential new state.
 
-If dry run reports conflicts, **do not apply**. Review the conflict IDs and source records locally; do not send private files or complete job URLs.
+If the strict dry run reports conflicts, **do not apply** immediately. `history_conflicts_by_reason` separates human `review_status` differences, inconsistent `ai_judged` flags, and undated metadata. The optional **read-only** check below preserves a prior AI-judged=True flag only if that history record has a valid `ai_judged_at` timestamp and the human review statuses are identical:
+
+```powershell
+.\.venv\Scripts\python.exe personal_local_state_migration.py --reconcile-ai-judged
+```
+
+Review `ai_judgments_reconciled`, `history_conflicts_by_reason`, and unresolved totals first. This opt-in is appropriate only where historical AI scoring is corroborated by existing Google Sheet evaluations. A `review_status` conflict or missing AI-judgment timestamp **still blocks apply**. If unresolved totals are zero, a separately requested `--apply --reconcile-ai-judged` may write the release copy, with private backup; never add `--apply` during diagnosis. Do not send private files or complete job URLs.
 
 
 ## 5. Release checks
