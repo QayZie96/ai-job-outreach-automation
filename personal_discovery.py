@@ -27,6 +27,7 @@ from personal_extra_feeds import (
     normalize_remote_ok, normalize_remotejobs, normalize_wwr_rss,
 )
 from personal_screening_v41 import calibrated_factors, update_history, load_history, pending_for_review
+from personal_posting_language import unsupported_posting_language
 
 BASE = Path(__file__).resolve().parent
 ARBEITNOW = "https://www.arbeitnow.com/api/job-board-api"
@@ -884,12 +885,8 @@ def candidate_priority(job):
     desc = description_text(job)
     if re.search(r"\b(?:8\+|10\+|12\+)\s+years?\b", desc):
         score -= 10
-    # A German-language description is not proof of a strict requirement;
-    # review it, but rank it below explicit English-language opportunities.
-    words = re.findall(r"[a-zäöüß]+", desc[:3000])
-    if len(words) >= 40 and sum(w in {"und", "der", "die", "das", "du", "deine", "mit", "wir", "bei"}
-                                 for w in words) / len(words) > 0.05:
-        score -= 25
+    # The posting-language gate is applied in screen_candidates, before
+    # ranking. No separate German-only soft penalty should conflict with it.
     if "intern" in title or "part-time" in title:
         score -= 10
     return score
@@ -937,6 +934,16 @@ def screen_candidates(jobs, audit=None):
         status, reason = preliminary_eligibility(job) if role_score else ("not_checked", "role excluded before eligibility check")
         if role_score and factors["hard_exclusion"] == "mandatory_language":
             status, reason = "ineligible", factors["reason"] + " required by posting"
+        # Posting language is a user-defined application eligibility filter,
+        # NOT an unsupported inference of a formal language requirement.
+        # Run on actual description prose (no title, location or publisher).
+        posting_language, language_evidence = unsupported_posting_language(
+            description_text(job)
+        ) if role_score else (None, "")
+        if posting_language and role_score and factors["hard_exclusion"] != "mandatory_language":
+            status = "ineligible"
+            reason = (f"Posting language not supported: {posting_language}. "
+                      f"{language_evidence}")
 
         senior_executive = bool(re.search(r"\b(?:director|head of|group head|vice president|vp|chief of staff)\b",
                                           str(job.get("job_title") or ""), re.IGNORECASE))
@@ -960,8 +967,10 @@ def screen_candidates(jobs, audit=None):
             reason = factors["reason"]
             status = "ineligible"
         elif status == "ineligible":
-            key = ("mandatory_language" if factors["hard_exclusion"] == "mandatory_language"
-                   or reason.startswith(("Mandatory", "Advanced mandatory")) else "geography")
+            key = ("posting_language" if reason.startswith("Posting language not supported:")
+                   else "mandatory_language" if factors["hard_exclusion"] == "mandatory_language"
+                   or reason.startswith(("Mandatory", "Advanced mandatory"))
+                   else "geography")
             counts[key + "_excluded"] += 1
             rejects[(job.get("source", ""), key)] += 1
             outcome = key + "_excluded"
