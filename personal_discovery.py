@@ -561,6 +561,7 @@ OUT_OF_SCOPE_TITLE = re.compile(
     r"solution|solutions|salesforce|ai)\s+(?:engineer|architect|developer)\b|"
     r"\b(?:engineer|developer|architect|scientist|copywriter|videographer|"
     r"video editor|graphic designer|product designer|\bdesigner|"
+    r"security operations analyst|soc analyst|creative strategist|"
     r"account executive|account development|sales representative|"
     r"sales development representative|business development representative|"
     r"clinical|medical|nurse|lawyer|legal counsel|"
@@ -908,7 +909,8 @@ def screen_candidates(jobs, audit=None):
             reason = factors["reason"]
             status = "ineligible"
         elif status == "ineligible":
-            key = "mandatory_language" if reason.startswith(("Mandatory", "Advanced mandatory")) else "geography"
+            key = ("mandatory_language" if factors["hard_exclusion"] == "mandatory_language"
+                   or reason.startswith(("Mandatory", "Advanced mandatory")) else "geography")
             counts[key + "_excluded"] += 1
             rejects[(job.get("source", ""), key)] += 1
             outcome = key + "_excluded"
