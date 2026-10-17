@@ -1,4 +1,4 @@
-name: One-time RAY four-provider coverage audit
+name: RAY four-provider audit — offline regression
 
 on:
   push:
@@ -12,25 +12,15 @@ permissions:
   contents: read
 
 jobs:
-  audit:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install minimal audit dependencies
-        run: python -m pip install requests beautifulsoup4 python-dotenv
-      - name: Offline guardrail tests
-        run: python -m unittest discover -s tests -p test_provider_coverage_audit.py -v
-      - name: Bounded live public-feed comparison (no credentials)
-        run: python provider_coverage_audit.py --live
-      - name: Preserve audit measurements
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ray-provider-coverage-audit
-          path: provider_audit_results/
-          if-no-files-found: warn
-          retention-days: 7
+      - name: Install existing RAY requirements
+        run: python -m pip install -r requirements.txt
+      - name: Run complete offline regression suite
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
