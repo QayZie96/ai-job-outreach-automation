@@ -642,6 +642,7 @@ EU_CITIES = (
 NON_EU_LOCATIONS = (
     "united kingdom", "uk", "london", "manchester", "bristol", "leeds", "oxford",
     "cambridge", "england", "scotland", "switzerland", "zurich", "zürich",
+    "wollerau", "schwyz",
     "lausanne", "geneva", "nyon", "zug", "usa", "united states", "canada",
     "latam", "australia", "serbia", "norway", "israel", "india", "japan",
 )
