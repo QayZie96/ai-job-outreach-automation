@@ -1,0 +1,29 @@
+name: Expanded Personal RAY — Release Candidate Checks
+
+on:
+  push:
+    branches:
+      - release/expanded-ray-unified-evaluations
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install existing Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run all offline regressions with optional providers configured
+        env:
+          PERSONAL_MAX_REMOTE_OK_CALLS: "1"
+          PERSONAL_MAX_WWR_CALLS: "1"
+          PERSONAL_MAX_REMOTEJOBS_ORG_CALLS: "1"
+          PERSONAL_MAX_ADZUNA_CALLS: "0"
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
