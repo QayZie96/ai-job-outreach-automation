@@ -62,11 +62,19 @@ def _read_history(file):
     return value
 
 
-def combine_histories(sources):
-    """Merge metadata by latest observation, without overwriting human decisions."""
+def combine_histories(sources, *, reconcile_ai_judged=False):
+    """Merge observations, preserving user decisions and confirmed AI reviews.
+
+    Without opt-in, contradictory AI flags are shown as conflicts. When the
+    user explicitly opts in, preserve a documented prior AI assessment
+    (ai_judged=True with a valid ai_judged_at), but NEVER override conflicting
+    human review statuses or an undocumented AI state.
+    """
     merged = {}
     source_sizes = {}
-    ambiguous = set()
+    conflicts = {"review_status": set(), "ai_judged": set(),
+                 "undated_metadata": set()}
+    ai_reconciled = set()
     for source_name, file in sources:
         rows = _read_history(file)
         source_sizes[source_name] = len(rows)
@@ -78,25 +86,39 @@ def combine_histories(sources):
             p_state = str(prior.get("review_status") or "pending").lower()
             i_state = str(incoming.get("review_status") or "pending").lower()
             if p_state != i_state:
-                # We cannot know whether an explicit pending reset occurred:
-                # missing reviewed_at is not a reliable change timestamp.
-                ambiguous.add(url)
+                # Human decisions are never reconciled automatically.
+                conflicts["review_status"].add(url)
                 continue
-            # If one history explicitly reset ai_judged and the other did not,
-            # preserve the conflict for human resolution rather than undoing it.
-            if bool(prior.get("ai_judged")) != bool(incoming.get("ai_judged")):
-                ambiguous.add(url)
-                continue
+            ai_mismatch = bool(prior.get("ai_judged")) != bool(incoming.get("ai_judged"))
+            if ai_mismatch:
+                documented = (prior if prior.get("ai_judged") else incoming)
+                # Valid ai_judged_at is an explicit completed-review signal.
+                # Preserving it avoids repeating paid evaluation of historic
+                # scored vacancies. This is an opt-in reconciliation, since a
+                # separate pending reset cannot be inferred from timestamps.
+                if (not reconcile_ai_judged or
+                        not _stamp(documented.get("ai_judged_at"))):
+                    conflicts["ai_judged"].add(url)
+                    continue
+                ai_reconciled.add(url)
             p_at, i_at = _stamp(prior.get("last_seen")), _stamp(incoming.get("last_seen"))
             if p_at is None and i_at is None:
                 # Same URL and no provable ordering. Preserve all existing
                 # metadata without trying to guess which record is newer.
                 if prior != incoming:
-                    ambiguous.add(url)
+                    conflicts["undated_metadata"].add(url)
                 continue
             newer = incoming if (i_at and (not p_at or i_at > p_at)) else prior
             older = prior if newer is incoming else incoming
             result = {**older, **newer}
+            if ai_mismatch:
+                documented = prior if prior.get("ai_judged") else incoming
+                result["ai_judged"] = True
+                result["ai_judged_at"] = documented["ai_judged_at"]
+                result["content_updated_since_review"] = bool(
+                    prior.get("content_updated_since_review") or
+                    incoming.get("content_updated_since_review")
+                )
             times = [(_stamp(r.get("first_seen")), r.get("first_seen"))
                      for r in (prior, incoming)]
             times = [x for x in times if x[0]]
@@ -110,7 +132,13 @@ def combine_histories(sources):
                     ) if date]
                 )[1]
             merged[url] = result
-    return merged, source_sizes, sorted(_fingerprint(u) for u in ambiguous)
+    unresolved = set().union(*conflicts.values())
+    return (
+        merged, source_sizes,
+        sorted(_fingerprint(u) for u in unresolved),
+        {k: len(v) for k, v in conflicts.items()},
+        len(ai_reconciled),
+    )
 
 
 def _source_connection(file):
@@ -200,7 +228,8 @@ def _default_backup():
     )
 
 
-def migrate(*, production, experiment, release, apply=False, backup_dir=None):
+def migrate(*, production, experiment, release, apply=False, backup_dir=None,
+            reconcile_ai_judged=False):
     production, experiment, release = map(Path, (production, experiment, release))
     if len({p.resolve() for p in (production, experiment, release)}) != 3:
         raise ValueError("Production, experiment and release must be separate directories")
@@ -213,7 +242,9 @@ def migrate(*, production, experiment, release, apply=False, backup_dir=None):
         ("experiment", experiment / HISTORY),
         ("release", release / HISTORY),
     ]
-    rows, hist_counts, history_conflicts = combine_histories(histories)
+    rows, hist_counts, history_conflicts, conflict_reasons, ai_reconciled = (
+        combine_histories(histories, reconcile_ai_judged=reconcile_ai_judged)
+    )
 
     with tempfile.TemporaryDirectory(prefix="ray-state-audit-") as work:
         merged_db, cache_counts, cache_conflicts = _prepare_cache(
@@ -226,6 +257,9 @@ def migrate(*, production, experiment, release, apply=False, backup_dir=None):
             "history_union": len(rows),
             "history_decision_conflict_ids": history_conflicts[:20],
             "history_decision_conflicts_total": len(history_conflicts),
+            "history_conflicts_by_reason": conflict_reasons,
+            "ai_judgments_reconciled": ai_reconciled,
+            "ai_reconciliation_opt_in": reconcile_ai_judged,
             "sqlite_cache_records": cache_counts,
             "sqlite_ambiguous_conflict_ids": cache_conflicts[:20],
             "sqlite_ambiguous_conflicts_total": len(cache_conflicts),
@@ -290,11 +324,14 @@ def main():
     parser.add_argument("--release", type=Path, default=ROOT)
     parser.add_argument("--apply", action="store_true",
                         help="Copy merged history/cache only into release, with backup")
+    parser.add_argument("--reconcile-ai-judged", action="store_true",
+                        help="Opt in to preserving documented completed AI reviews across history copies; still blocks human decision conflicts")
     parser.add_argument("--backup-dir", type=Path, help="Unique private backup folder (apply only)")
     args = parser.parse_args()
     result = migrate(
         production=args.production, experiment=args.experiment,
         release=args.release, apply=args.apply, backup_dir=args.backup_dir,
+        reconcile_ai_judged=args.reconcile_ai_judged,
     )
     print(json.dumps(result, indent=2))
 
