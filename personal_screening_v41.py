@@ -264,9 +264,16 @@ def replay_audit(audit_path: str | Path, report_path: str | Path | None = None,
         kind = "full" if url in full else "excerpt"
         counts["evidence_" + kind] += 1
         factors = calibrated_factors(title, desc)
+        from personal_posting_language import unsupported_posting_language
+        posting_language, language_evidence = unsupported_posting_language(desc)
         before = row["screen_outcome"]
         after = before
-        if factors["hard_exclusion"] and before in ("candidate", "review_only"):
+        reason = factors["reason"]
+        if posting_language and before in ("candidate", "review_only"):
+            after = "posting_language_excluded"
+            reason = (f"Posting language not supported: {posting_language}. "
+                      f"{language_evidence}")
+        elif factors["hard_exclusion"] and before in ("candidate", "review_only"):
             after = factors["hard_exclusion"] + "_excluded"
         elif before == "candidate" and factors["force_review"]:
             after = "review_only"
@@ -281,7 +288,7 @@ def replay_audit(audit_path: str | Path, report_path: str | Path | None = None,
                             "job_url": url, "old_outcome": before, "new_outcome": after,
                             "evidence": kind, "geography": row.get("eligibility", "not_checked"),
                             "rank": rank, "flags": ";".join(factors["flags"]),
-                            "reason": factors["reason"]})
+                            "reason": reason})
         counts["old"][before] = counts["old"].get(before, 0) + 1
         counts["new"][after] = counts["new"].get(after, 0) + 1
     if output_path:
