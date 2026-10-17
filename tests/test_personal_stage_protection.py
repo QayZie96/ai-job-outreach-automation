@@ -105,6 +105,111 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual(kept, [])
                 self.assertEqual(counts["role_out_of_scope"], 1)
 
+    def test_swiss_non_eu_site_and_native_german_fails_screen(self):
+        row = job(
+            "Customer Service Specialist",
+            "Minimum 3 years in ocean freight. Native-level German and fluent English.",
+            source="Arbeitnow", remote=False,
+            location="Wollerau, Schwyz",
+        )
+        self.assertEqual(
+            screening.mandatory_language(row["job_title"], row["job_description"]),
+            "German",
+        )
+        self.assertEqual(d.preliminary_eligibility(row)[0], "ineligible")
+        kept, stats, _ = d.screen_candidates([row])
+        self.assertFalse(kept)
+        self.assertEqual(stats["mandatory_language_excluded"], 1)
+
+    def test_swiss_on_site_without_language_is_non_eu_out_of_scope(self):
+        row = job("Vendor Operations Specialist",
+                  "Manage supplier logistics and Excel reporting.",
+                  source="Arbeitnow", remote=False, location="Wollerau, Schwyz")
+        eligible, explanation = d.preliminary_eligibility(row)
+        self.assertEqual(eligible, "ineligible")
+        self.assertIn("outside the EU", explanation)
+
+    def test_dutch_creative_lead_not_selected_for_gemini(self):
+        row = job(
+            "Freelance Creative / Content Lead – DTC e-commerce launch",
+            ("Voor de launch van een nieuw direct-to-consumer consumer brand zoeken "
+             "we een ervaren freelance Creative / Content Lead die tijdelijk "
+             "de overkoepelende regie pakt over de content en productpresentatie. "
+             "De opdracht is juist om ervoor te zorgen dat al deze disciplines "
+             "vanuit één duidelijke commerciële en visuele lijn samenwerken. "
+             "We zoeken daarom geen full-service bureau en ook niet iemand "
+             "die alles zelf moet produceren. De creatieve opdracht begint "
+             "dus bij een bestaande strategie en creatieve direction. ") * 2,
+        )
+        kept, _, _ = d.screen_candidates([row])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["review_only"])
+        self.assertIn("creative_direction_specialism_unverified", kept[0]["fit_flags"])
+        self.assertIn("predominantly_dutch_language_posting_review", kept[0]["fit_flags"])
+
+    def test_product_manager_explicit_3years_in_product_company_review(self):
+        row = job(
+            "Product Manager - AI & Supplier Management",
+            "We are a B2B SaaS platform. We require 3+ years of Product "
+            "Management experience in a product company and a track record "
+            "of shipping substantial features end-to-end.",
+        )
+        kept, _, _ = d.screen_candidates([row])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["review_only"])
+        self.assertIn("dedicated_product_manager_experience_unverified",
+                      kept[0]["fit_flags"])
+
+    def test_english_operations_copy_not_mistaken_for_dutch(self):
+        text = (
+            "We are looking for a business operations analyst to support our "
+            "team with data reporting and marketplace inventory management. "
+            "You will work with our stakeholders to improve the processes "
+            "across different markets, implement new tools and help our teams "
+            "coordinate vendor relationships efficiently. "
+        ) * 3
+        row = job("Marketplace Operations Analyst", text)
+        kept, _, _ = d.screen_candidates([row])
+        self.assertEqual(len(kept), 1)
+        self.assertNotIn("predominantly_dutch_language_posting_review", kept[0]["fit_flags"])
+        self.assertFalse(kept[0]["review_only"])
+
+    def test_optional_native_german_not_excluded(self):
+        self.assertIsNone(screening.mandatory_language(
+            "Operations Specialist",
+            "Run cross-border marketplace operations. Native-level German "
+            "is a plus but English is the only required language.",
+        ))
+
+    def test_optional_c1_german_misread_by_gemini_becomes_review(self):
+        from personal_evaluation import classify
+        vacancy = job(
+            "IT Program Manager", "German at C1 or above, prior experience in "
+            "a regulated environment, exposure to ISO 27001, SOC 2 or DORA, "
+            "or an ITIL qualification are all a plus.",
+            location="Berlin", remote=False,
+            precheck_eligibility="uncertain",
+        )
+        result = {
+            "eligibility": "ineligible",
+            "fit_score": 50,
+            "mandatory_requirements": ["German C1"],
+            "matched_evidence": [],
+            "posting_evidence": [],
+            "main_gap_or_uncertainty": "Mandatory C1 German language requirement",
+            "reason": "Requires a mandatory German C1 language level.",
+        }
+        result = classify(result, vacancy)
+        self.assertEqual(result["eligibility"], "uncertain")
+        self.assertEqual(result["decision"], "Review")
+        self.assertIn("optional plus", result["main_gap_or_uncertainty"])
+        # When the job actually has an independent deterministic blocker,
+        # model output must not be automatically rescued.
+        vacancy["precheck_eligibility"] = "ineligible"
+        result["eligibility"] = "ineligible"
+        result["main_gap_or_uncertainty"] = "Mandatory C1 German language requirement"
+        self.assertEqual(classify(result, vacancy)["decision"], "Ineligible")
+
     def test_regular_ops_remains_candidate(self):
         kept, _, _ = d.screen_candidates([
             job("Marketplace Operations Specialist",
