@@ -667,9 +667,15 @@ class Tests(unittest.TestCase):
         self.assertEqual(http.calls["Himalayas"], 17)
         requests = [c[1]["params"] for c in session.calls]
         self.assertTrue(all(q["page"] == 1 for q in requests[:6]))
-        self.assertTrue(all(q["page"] == 2 for q in requests[6:12]))
-        self.assertEqual([q.get("q") for q in requests[12:]],
+        self.assertTrue(all(q["page"] == 2 for q in requests[6:10]))
+        self.assertEqual([q.get("q") for q in requests[6:10]],
+                         list(d.HIMALAYAS_SECOND_PAGE_QUERIES))
+        self.assertEqual([q.get("q") for q in requests[10:15]],
                          list(d.HIMALAYAS_EXTRA_QUERIES))
+        self.assertTrue(all(q.get("country") == "GR" for q in requests[:15]))
+        self.assertEqual([q.get("q") for q in requests[15:]],
+                         list(d.HIMALAYAS_GLOBAL_QUERIES))
+        self.assertTrue(all("country" not in q for q in requests[15:]))
 
     def test_jobicy_cursor_pagination_requires_provider_token(self):
         session = FakeSession([
