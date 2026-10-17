@@ -132,6 +132,12 @@ class Tests(unittest.TestCase):
                 "GEMINI_API_KEY": "", "PERSONAL_MAX_ARBEITNOW_CALLS": "1",
                 "PERSONAL_MAX_REMOTIVE_CALLS": "1", "PERSONAL_MAX_ADZUNA_CALLS": "0",
                 "PERSONAL_MAX_HIMALAYAS_CALLS": "0", "PERSONAL_MAX_JOBICY_CALLS": "0",
+                # Explicitly disable *all* optional collectors for this two-
+                # response fixture. Local ignored .env may enable them; the
+                # test must not depend on a developer's current source budget.
+                "PERSONAL_MAX_REMOTE_OK_CALLS": "0",
+                "PERSONAL_MAX_WWR_CALLS": "0",
+                "PERSONAL_MAX_REMOTEJOBS_ORG_CALLS": "0",
             }):
                 out, stats = d.run(collect_only=True, session=session, report_path=str(report))
             self.assertEqual(len(out), 2)
