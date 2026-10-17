@@ -1,4 +1,4 @@
-name: RAY screening refinement — offline regression
+name: RAY capped collection + screening — offline regression
 
 on:
   push:
