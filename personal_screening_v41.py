@@ -55,6 +55,13 @@ def mandatory_language(title: str, description: str) -> str | None:
         if re.search(rf"\b{lang}(?:[- ]speaking|[- ]fluen\w*)\b|"
                      rf"\b{lang}\s+(?:fluency|required|c1|c2)\b", title):
             return language.title()
+        # A B2 requirement may appear as "speak English and German fluently".
+        # Merely mentioning Germany or German clients is insufficient evidence.
+        if (re.search(rf"\bwith\s+{lang}\b", title)
+                and re.search(
+                    rf"\b{lang}\b.{0,55}\b(?:fluent|fluently|b2|c1|c2|required|mandatory)\b|"
+                    rf"\bspeak\s+english\s+and\s+{lang}\s+fluently\b", desc)):
+            return language.title()
         patterns = (
             rf"\b(?:fluent|fluency|native|c1|c2|business fluent|professional proficiency)"
             rf"\s+(?:in\s+)?{lang}\b",
