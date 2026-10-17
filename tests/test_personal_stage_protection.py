@@ -172,17 +172,40 @@ class ExistingSheetProtectionTests(unittest.TestCase):
             mock_service = MagicMock()
             with patch.object(sheet, "verify_spreadsheet_destination",
                               return_value="ISOLATED-STAGING-ID"):
-                with patch.object(sheet, "_service", return_value=mock_service):
-                    with patch.object(sheet, "_setup") as setup:
-                        with patch.object(sheet, "_write_manual_review",
-                                          return_value={"manual_added": 1,
-                                                        "manual_updated": 0}) as writer:
-                            result = sheet.publish_manual_only_from_report(report)
+                with patch.object(sheet, "read_existing_evaluations",
+                                  return_value={"existing_urls": set()}):
+                    with patch.object(sheet, "_service", return_value=mock_service):
+                        with patch.object(sheet, "_setup") as setup:
+                            with patch.object(sheet, "_write_manual_review",
+                                              return_value={"manual_added": 1,
+                                                            "manual_updated": 0}) as writer:
+                                result = sheet.publish_manual_only_from_report(report)
             self.assertEqual(result["manual_added"], 1)
             setup.assert_called_once_with(mock_service, "ISOLATED-STAGING-ID")
             writer.assert_called_once_with(
                 mock_service, "ISOLATED-STAGING-ID", [source]
             )
+
+    def test_publishing_offline_report_does_not_duplicate_existing_evaluations(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        source = job("Marketplace Operations Specialist", review_only=True)
+        with TemporaryDirectory() as folder:
+            report = Path(folder) / "collect.json"
+            report.write_text(json.dumps({
+                "evaluation": {}, "evaluated_jobs": [source],
+            }), encoding="utf-8")
+            with patch.object(sheet, "verify_spreadsheet_destination",
+                              return_value="ISOLATED-STAGING-ID"):
+                with patch.object(sheet, "read_existing_evaluations",
+                                  return_value={"existing_urls": {source["job_url"]}}):
+                    with patch.object(sheet, "_service", return_value=MagicMock()):
+                        with patch.object(sheet, "_setup"):
+                            with patch.object(sheet, "_write_manual_review",
+                                              return_value={"manual_added": 0, "manual_updated": 0}) as writer:
+                                sheet.publish_manual_only_from_report(report)
+            self.assertEqual(writer.call_args.args[2], [])
 
     def test_manual_only_rejects_assessment_report(self):
         import json
