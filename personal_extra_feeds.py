@@ -114,7 +114,10 @@ def normalize_remotejobs(payload):
 def normalize_wwr_rss(xml_text):
     if not isinstance(xml_text, str):
         raise ValueError("We Work Remotely feed must be RSS text")
-    root = ET.fromstring(xml_text)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError("We Work Remotely malformed RSS document") from exc
     if root.tag != "rss" or root.find("channel") is None:
         raise ValueError("We Work Remotely unexpected RSS document")
     results = []
