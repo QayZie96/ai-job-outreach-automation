@@ -199,6 +199,52 @@ class ExistingSheetProtectionTests(unittest.TestCase):
                     sheet.publish_manual_only_from_report(report)
                 service.assert_not_called()
 
+    def test_run_excludes_existing_staging_score_from_gemini_shortlist(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        previously_scored = job("Marketplace Operations Specialist",
+                                "Manage marketplace listings and supplier processes.")
+        newly_discovered = job(
+            "Ecommerce Inventory Coordinator",
+            "Manage online inventory data, supplier processes and Excel reporting.",
+            source_job_id="sample-2",
+            job_url="https://example.com/jobs/sample-2",
+        )
+        with TemporaryDirectory() as folder:
+            with patch.dict("os.environ", {
+                "PERSONAL_GEMINI_FREE_TIER_CONFIRMED": "YES",
+                "PERSONAL_MAX_AI_CANDIDATES": "40",
+            }):
+                with patch.object(d, "profile_text", return_value="Verified profile"):
+                    with patch.object(d, "collect", return_value=(
+                        [previously_scored, newly_discovered], {}, []
+                    )):
+                        with patch.object(
+                            sheet, "read_existing_evaluations", return_value={
+                                "existing_urls": {previously_scored["job_url"]},
+                                "scored_urls": {previously_scored["job_url"]},
+                                "terminal_urls": set(),
+                            }
+                        ):
+                            with patch.object(
+                                sheet, "verify_spreadsheet_destination",
+                                return_value="STAGING-SHEET-ID"
+                            ):
+                                with patch.object(d, "Evaluator") as evaluator:
+                                    evaluator.return_value.evaluate.return_value = (
+                                        [], {"gemini_calls": 0, "cache_hits": 0}
+                                    )
+                                    with patch.object(sheet, "write_personal_results"):
+                                        _, metrics = d.run(
+                                            write_sheet=True,
+                                            report_path=str(Path(folder) / "stage.json"),
+                                        )
+        selected = evaluator.return_value.evaluate.call_args.args[0]
+        self.assertEqual([j["job_url"] for j in selected],
+                         [newly_discovered["job_url"]])
+        self.assertEqual(metrics["candidates_protected_from_repeat_ai"], 1)
+        self.assertEqual(metrics["staging_known_candidate_urls"], 1)
+
     def test_failed_sheet_read_is_not_silently_swallowed(self):
         svc = MagicMock()
         svc.spreadsheets.return_value.values.return_value.get.return_value.execute.side_effect = PermissionError(
