@@ -115,6 +115,14 @@ class CalibrationTests(unittest.TestCase):
 
 
 class ExistingSheetProtectionTests(unittest.TestCase):
+    def test_experiment_refuses_production_personal_ray_sheet(self):
+        with patch.dict("os.environ", {
+            "PERSONAL_GOOGLE_SHEET_ID": sheet.MASTER_PERSONAL_RAY_SHEET_ID,
+            "GOOGLE_SHEET_ID": "SOME-OTHER-DEMO-SHEET",
+        }):
+            with self.assertRaisesRegex(ValueError, "production Personal Ray master"):
+                sheet.verify_spreadsheet_destination()
+
     def test_read_only_reconcile_existing_evaluations(self):
         h = sheet.SHEET_HEADERS
         def tabrow(url, score="", status="New"):
