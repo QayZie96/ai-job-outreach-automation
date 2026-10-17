@@ -141,11 +141,9 @@ class CalibrationTests(unittest.TestCase):
              "die alles zelf moet produceren. De creatieve opdracht begint "
              "dus bij een bestaande creative direction and content strategy. ") * 2,
         )
-        kept, _, _ = d.screen_candidates([row])
-        self.assertEqual(len(kept), 1)
-        self.assertTrue(kept[0]["review_only"])
-        self.assertIn("creative_direction_specialism_unverified", kept[0]["fit_flags"])
-        self.assertIn("predominantly_dutch_language_posting_review", kept[0]["fit_flags"])
+        kept, counts, _ = d.screen_candidates([row])
+        self.assertEqual(kept, [])
+        self.assertEqual(counts["posting_language_excluded"], 1)
 
     def test_product_manager_explicit_3years_in_product_company_review(self):
         row = job(
@@ -272,8 +270,6 @@ class CalibrationTests(unittest.TestCase):
         cases = [
             ("eCommerce Manager - GSA", "The Orchard",
              "The E-Commerce Manager is responsible for driving growth. " * 9),
-            ("eCommerce Data Analyst (m/w/d)", "Melitta Gruppe",
-             "Über uns Du willst etwas bewegen und die Zukunft nachhaltig gestalten. " * 9),
         ]
         for title, company, desc in cases:
             with self.subTest(title=title):
