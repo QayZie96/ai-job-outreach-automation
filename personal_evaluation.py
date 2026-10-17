@@ -155,8 +155,18 @@ def classify(result, job):
     if job.get("source") == "Himalayas" and job.get("location_restrictions"):
         codes = {str(x).upper() for x in job["location_restrictions"]}
         if "GR" not in codes and "GREECE" not in codes:
-            eligibility = "ineligible"
-            result["main_gap_or_uncertainty"] = "Himalayas country restrictions exclude Greece"
+            # A confirmed EU-country allowlist is not Greece-remote eligible,
+            # but relocation is a distinct permitted user preference.
+            if str(job.get("precheck_reason") or "").startswith("EU-country location restriction"):
+                if eligibility != "ineligible":
+                    eligibility = "uncertain"
+                    result["main_gap_or_uncertainty"] = (
+                        result.get("main_gap_or_uncertainty")
+                        or "EU-country restriction: relocation and contracting unverified"
+                    )
+            else:
+                eligibility = "ineligible"
+                result["main_gap_or_uncertainty"] = "Himalayas country restrictions exclude Greece"
     geo = str(job.get("location") or "").strip().lower()
     if job.get("source") == "Jobicy" and geo in {"usa", "united states", "us only", "united states only"}:
         eligibility = "ineligible"
