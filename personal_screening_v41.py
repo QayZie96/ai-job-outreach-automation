@@ -63,8 +63,11 @@ def mandatory_language(title: str, description: str) -> str | None:
                     rf"\bspeak\s+english\s+and\s+{lang}\s+fluently\b", desc)):
             return language.title()
         # "Native-level German" is mandatory language evidence, not a market label.
-        if re.search(rf"\bnative[- ]level\s+{lang}\b", desc):
-            return language.title()
+        for native_match in re.finditer(rf"\bnative[- ]level\s+{lang}\b", desc):
+            # Optional/preferred/native-level desirable is not mandatory.
+            trailing = desc[native_match.end():native_match.end() + 75]
+            if not re.search(r"\b(?:a plus|preferred|optional|desirable|not required)\b", trailing):
+                return language.title()
         patterns = (
             rf"\b(?:fluent|fluency|native|c1|c2|business fluent|professional proficiency)"
             rf"\s+(?:in\s+)?{lang}\b",
