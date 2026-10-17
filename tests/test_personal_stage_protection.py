@@ -210,6 +210,62 @@ class CalibrationTests(unittest.TestCase):
         result["main_gap_or_uncertainty"] = "Mandatory C1 German language requirement"
         self.assertEqual(classify(result, vacancy)["decision"], "Ineligible")
 
+    def test_remote_board_job_description_non_eu_restrictions(self):
+        cases = [
+            ("Remote OK", "Unknown",
+             "Location: Philippines (Remote). Monitor Amazon and eBay sellers.", "Marketplace Analyst"),
+            ("Remote OK", "Unknown",
+             "Work from anywhere in the Philippines. Track marketplace inventory.", "Marketplace Analyst"),
+            ("Remote OK", "Unknown",
+             "Looking for Philippines-based candidates. Run CRM operations.", "Marketing and Sales Administrator"),
+            ("Remote OK", "Remote - US",
+             "Manage marketing operations across brands.", "Marketing Operations Specialist"),
+            ("We Work Remotely", "Unknown",
+             "Headquarters: Remote - Mexico. This role will be remote, "
+             "and based in Mexico City Mexico. Analyze billing and pricing.", "Billing Operations Analyst"),
+            ("Remote OK", "Unknown",
+             "Location Nearshore, based in Mexico or Brazil - remote-based "
+             "delivery model. Lead Oracle SCM configuration.", "Oracle Fusion Cloud Lead Logistics"),
+            ("Remote OK", "Mexico City, Mexico - Remote",
+             "This role is remote in the country of Mexico. You must be located "
+             "in and authorized to work in Mexico.", "Customer Success Manager"),
+            ("We Work Remotely", "Unknown",
+             "This role is remote within the United States. Review products.", "Product Manager"),
+        ]
+        for source, place, desc, title in cases:
+            with self.subTest(title=title, description=desc[:30]):
+                item = job(title, desc, source=source, location=place)
+                self.assertEqual(d.preliminary_eligibility(item)[0], "ineligible")
+                kept, stats, _ = d.screen_candidates([item])
+                self.assertEqual(kept, [])
+                self.assertEqual(stats["geography_excluded"], 1)
+
+    def test_remote_company_hq_or_us_clients_does_not_exclude(self):
+        safe = [
+            "Headquarters: Remote - Mexico. We serve Mexico and US clients.",
+            "The company sells to customers in the United States and Brazil.",
+            "We have a team in Philippines but hire globally.",
+            "Work anywhere in the world, including from the Philippines.",
+        ]
+        for text in safe:
+            with self.subTest(text=text[:38]):
+                item = job("Marketplace Operations Specialist", text)
+                self.assertEqual(d.preliminary_eligibility(item)[0], "uncertain")
+
+    def test_explicit_chinese_speaking_requirement_excluded(self):
+        item = job(
+            "Sourcing / Production Manager (Chinese-speaking)",
+            "Are you fluent in Chinese and experienced managing factory operations?",
+            location="Portugal",
+        )
+        self.assertEqual(
+            screening.mandatory_language(item["job_title"], item["job_description"]),
+            "Chinese",
+        )
+        kept, counts, _ = d.screen_candidates([item])
+        self.assertFalse(kept)
+        self.assertEqual(counts["mandatory_language_excluded"], 1)
+
     def test_regular_ops_remains_candidate(self):
         kept, _, _ = d.screen_candidates([
             job("Marketplace Operations Specialist",
