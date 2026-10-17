@@ -57,6 +57,31 @@ Before cutover, reconcile/copy these from the current production and experimenta
 
 The staging spreadsheet protects previously scored URLs and terminal user decisions, independently of local cache; nevertheless history/cache migration is worth checking to avoid redundant work. Never commit secrets, private profiles, reports or SQLite data.
 
+### Safe local consolidation (release branch helper)
+
+The release branch includes `personal_local_state_migration.py`: it reads only the **root** production and experimental state, not nested `adzuna_probe` / `optional_source_probe` reports; this intentionally avoids seeding research-only observations.
+
+```powershell
+cd "$env:USERPROFILE\Desktop\ai-automation-case-study\ray-expanded-release"
+git fetch origin
+git merge --ff-only origin/release/expanded-ray-unified-evaluations
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+.\.venv\Scripts\python.exe personal_local_state_migration.py
+```
+
+The default is **dry run**, with zero Gemini/provider/Sheets calls. It compares all three SQLite caches, taking a consistent full backup of the production SQLite cache into a temporary scratch database and merging conflict-free newer records from experiment/release. It uses the newest dated observation for non-review history, preserves earliest first-seen dates, and fails closed if user review statuses or AI-judged flags conflict. The dry run produces hashed conflict identifiers, not job URLs or review details.
+
+If no conflicts and source states remain unchanged, apply locally:
+
+```powershell
+.\.venv\Scripts\python.exe personal_local_state_migration.py --apply
+```
+
+The apply path backs up any existing **release** cache and history to a uniquely timestamped private directory beneath `%LOCALAPPDATA%\PersonalRay`. It writes only the new release cache/history and never alters production or experimental sources. Do not enable the 09:00 task until the exact scheduler command/path is inspected; if the old task runs again before cutover, repeat the dry run and re-evaluate potential new state.
+
+If dry run reports conflicts, **do not apply**. Review the conflict IDs and source records locally; do not send private files or complete job URLs.
+
+
 ## 5. Release checks
 
 Only runtime files, tests and one offline CI workflow were selected from the experimental branch; broader provider research/probes and 100+ exploratory commits were deliberately excluded.
