@@ -1119,6 +1119,85 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     return completed, eval_stats
 
 
+def evaluate_saved_collection_report(source_report, *, output_path=None):
+    """One explicit Gemini batch from a prior collect-only JSON report.
+
+    No job-board HTTP, no provider history changes, no production Sheet writes,
+    and never more than one Gemini API request, even on cache misses.
+    """
+    report = Path(source_report)
+    raw = json.loads(report.read_text(encoding="utf-8"))
+    collected = raw.get("evaluated_jobs")
+    if not isinstance(collected, list) or not isinstance(raw.get("evaluation"), dict):
+        raise ValueError("Not a recognized Personal RAY collection report")
+    if any(not isinstance(j, dict) or "assessment" in j for j in collected):
+        raise ValueError("Input must be an unassessed --collect-only report")
+
+    from personal_sheets import (
+        verify_spreadsheet_destination, read_existing_evaluations,
+        write_personal_results,
+    )
+    # Preflight before paid API work. Ensure we cannot use the master workbook.
+    verify_spreadsheet_destination()
+    protected = read_existing_evaluations()
+    if os.getenv("PERSONAL_GEMINI_FREE_TIER_CONFIRMED") != "YES":
+        raise RuntimeError("Explicit Gemini Free Tier confirmation required for staged evaluation")
+    profile = profile_text()  # fail before Gemini on missing local profile
+
+    # Reclassify the frozen set with CURRENT deterministic rules, not the
+    # potentially stale review_only flags from the original collection.
+    rescored, precheck, _ = screen_candidates(
+        deduplicate([dict(j) for j in collected])
+    )
+    terminal = protected["scored_urls"] | protected["terminal_urls"]
+    # Never promote jobs that were explicitly in the manual-only queue in the
+    # source report, even if a later rule would rank them higher.
+    pending = [
+        j for j in rescored if not j.get("review_only")
+        and not next(
+            (old.get("review_only", False) for old in collected
+             if canonical_url(old.get("job_url")) == j["job_url"]), False
+        )
+        and j["job_url"] not in terminal
+    ]
+    selected = prioritize_candidates(pending, limit=5)
+    # Cap the remote Gemini budget IN CODE: not user .env MAX_GEMINI_CALLS.
+    evaluator = Evaluator(profile, PersonalCache(), max_calls=1)
+    results, ai = evaluator.evaluate(selected)
+    if ai.get("gemini_calls", 0) > 1:
+        raise RuntimeError("One-batch Gemini hard ceiling exceeded")
+    stats = {
+        "mode": "offline_existing_report_one_gemini_batch",
+        "source_report": report.name,
+        "screened_again": len(rescored),
+        "precheck": dict(precheck),
+        "already_scored_in_staging": len(protected["scored_urls"]),
+        "protected_from_repeat_ai": sum(j["job_url"] in terminal for j in rescored),
+        "gemini_input_count": len(selected),
+        "gemini_selected_urls": [j["job_url"] for j in selected],
+        **ai,
+    }
+    # Do not rewrite Manual Review, repeat source collection, or rejudge
+    # historical production rows. Cache results survive Sheet failure.
+    if results:
+        published = write_personal_results(
+            results, Counter(j["source"] for j in selected),
+            Counter(), [], stats, manual_jobs=[]
+        )
+        stats["sheet"] = published
+    else:
+        stats["sheet"] = {"added": 0, "updated": 0, "manual_added": 0,
+                          "manual_updated": 0}
+    destination = Path(output_path) if output_path else report.with_name(
+        report.stem + "_gemini_pilot.json")
+    write_report(destination, results, Counter(j["source"] for j in selected),
+                 Counter(), [], stats)
+    print(f"Staging Gemini pilot: {len(selected)} jobs selected, "
+          f"{ai.get('gemini_calls', 0)} Gemini calls, {len(results)} evaluated. "
+          f"Staging rows: {stats['sheet']}. Report: {destination}")
+    return results, stats
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Explicitly allow live provider/API calls")
@@ -1127,14 +1206,21 @@ if __name__ == "__main__":
     parser.add_argument("--report", default="personal_run.json")
     parser.add_argument("--publish-manual-report", metavar="JSON_PATH", default=None,
                         help="Offline staging Sheet upsert of manual leads from collect-only report")
+    parser.add_argument("--evaluate-report", metavar="JSON_PATH", default=None,
+                        help="Rescreen frozen collection; at most 1 Gemini batch, staging Sheet only")
     args = parser.parse_args()
-    if args.publish_manual_report:
+    if args.publish_manual_report or args.evaluate_report:
         if args.live or args.collect_only or args.write_sheet:
-            parser.error("--publish-manual-report cannot be combined with collection/AI options")
+            parser.error("Offline report modes cannot be combined with collection/AI flags")
+        if args.publish_manual_report and args.evaluate_report:
+            parser.error("Choose only one offline report mode")
         load_dotenv(BASE / ".env")
-        from personal_sheets import publish_manual_only_from_report
-        result = publish_manual_only_from_report(args.publish_manual_report)
-        print(f"Manual-only staging publication complete: {result}")
+        if args.publish_manual_report:
+            from personal_sheets import publish_manual_only_from_report
+            result = publish_manual_only_from_report(args.publish_manual_report)
+            print(f"Manual-only staging publication complete: {result}")
+        else:
+            evaluate_saved_collection_report(args.evaluate_report)
     else:
         if not args.live:
             parser.error("Pass --live to authorize bounded API calls (no scheduling)")
