@@ -39,8 +39,12 @@ HIMALAYAS_QUERIES = (None, "operations", "ecommerce", "automation",
                      "marketing", "analyst")
 # Experimental coverage expansion: broad page 2 first, then selected
 # high-signal niche queries. No unlimited crawl of Himalayas' global feed.
+HIMALAYAS_SECOND_PAGE_QUERIES = ("ecommerce", "marketing", "operations", "automation")
 HIMALAYAS_EXTRA_QUERIES = ("catalogue", "product data", "pricing",
                            "procurement", "implementation")
+# Two international queries had higher verified incremental screening yield
+# than the general GR:p2 search in the bounded October 17 comparison.
+HIMALAYAS_GLOBAL_QUERIES = ("operations", "ecommerce")
 # Query-by-geography instead of restrictive combinations such as
 # tag=operations+geo=europe; keep titles and full employer descriptions locally.
 JOBICY_FILTERS = ((None, "europe"), (None, "anywhere"))
@@ -297,26 +301,29 @@ def collect(http):
     except (ProviderError, KeyError, TypeError) as exc:
         errors.append(str(exc))
 
-    # Exhaust a bounded and deliberately prioritized search plan: existing
-    # first pages, their second pages, then five niche page-1 searches.
+    # Six original first pages, four high-yield second pages, then selected
+    # niche Greece and international searches: exactly 17 planned requests.
     hima_plan = (
-        [(q, 1) for q in HIMALAYAS_QUERIES]
-        + [(q, 2) for q in HIMALAYAS_QUERIES]
-        + [(q, 1) for q in HIMALAYAS_EXTRA_QUERIES]
+        [(q, 1, "GR") for q in HIMALAYAS_QUERIES]
+        + [(q, 2, "GR") for q in HIMALAYAS_SECOND_PAGE_QUERIES]
+        + [(q, 1, "GR") for q in HIMALAYAS_EXTRA_QUERIES]
+        + [(q, 1, None) for q in HIMALAYAS_GLOBAL_QUERIES]
     )
-    for query, page in hima_plan:
+    for query, page, country in hima_plan:
         if (http.calls["Himalayas"] >= http.limits.get("Himalayas", 0)
                 or "Himalayas" in http.blocked):
             break
         try:
-            params = {"country": "GR", "sort": "recent", "page": page}
+            params = {"sort": "recent", "page": page}
+            if country:
+                params["country"] = country
             if query:
                 params["q"] = query
             payload = http.get_json("Himalayas", HIMALAYAS, params)
             if payload.get("success") is False:
                 raise ProviderError("Himalayas response indicates failure")
             add("Himalayas", payload.get("jobs") or [], normalize_himalayas,
-                query=f"GR:{query or 'all'}:p{page}")
+                query=f"{country or 'global'}:{query or 'all'}:p{page}")
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
             if "Himalayas" in http.blocked:
