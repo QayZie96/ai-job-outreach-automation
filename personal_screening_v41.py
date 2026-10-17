@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 LANGUAGES = ("spanish", "german", "dutch", "french", "italian", "portuguese",
              "polish", "swedish", "danish", "norwegian", "finnish", "turkish",
-             "arabic", "japanese", "russian", "ukrainian", "czech")
+             "arabic", "japanese", "russian", "ukrainian", "czech",
+             "chinese", "mandarin", "korean", "hindi", "armenian")
 OPTIONAL = re.compile(r"\b(preferred|desirable|advantage|optional|a plus|nice.to.have|bonus|not required|a benefit)\b", re.I)
 DUTIES = re.compile(r"\b(manag|coordinat|automat|analys|analyz|report|data|workflow|"
                     r"catalog|inventory|customer|commerce|supplier|operations|project|"
