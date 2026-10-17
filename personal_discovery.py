@@ -914,7 +914,13 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     # Otherwise a completed-but-unpublished job would be silently skipped.
     if write_sheet:
         from personal_sheets import write_personal_results
-        write_personal_results(completed, stats, http.calls, errors, eval_stats)
+        # Persist exploratory/manual-review-only vacancies separately from AI
+        # Evaluations. Human Review Status and Notes are preserved by URL.
+        manual_jobs = [job for job in candidates if job.get("review_only")]
+        sheet_stats = write_personal_results(
+            completed, stats, http.calls, errors, eval_stats, manual_jobs=manual_jobs
+        )
+        eval_stats["sheet"] = sheet_stats
     eval_stats["history"] = update_history(history_file, unique, evaluated_urls=judged_now)
     eval_stats["history_file"] = str(history_file)
     path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
