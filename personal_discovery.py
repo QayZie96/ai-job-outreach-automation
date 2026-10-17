@@ -166,9 +166,12 @@ class BudgetedHTTP:
                         len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
                     )
                     return payload
-                if response.status_code in {401, 403, 429}:
+                if response.status_code == 429:
                     self.blocked.add(source)
                     raise ProviderError(f"{source} rate limited (429); no retry")
+                if response.status_code in {401, 403}:
+                    self.blocked.add(source)
+                    raise ProviderError(f"{source}: HTTP {response.status_code}; further requests stopped")
                 if response.status_code not in {500, 502, 503, 504}:
                     raise ProviderError(f"{source}: HTTP {response.status_code}")
                 error = f"HTTP {response.status_code}"
