@@ -40,4 +40,4 @@ Official references:
 
 Run `python -m unittest discover -s tests -p 'test_*.py' -v`. The new fixtures cover no requests at zero, three independent opt-ins, normalization, WWR RSS dates/malformed responses, Remote OK legal row, bounded RemoteJobs.org pagination, hard request ceilings, and rate-limit handling. No live API, Google credentials or Gemini are needed.
 
-**Status:** Implementation on experimental branch, waiting for offline regression results. Live-enabled integrated collection not yet run, by design.
+**Verification:** 101 tests passed on GitHub Actions: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/38991554637. All three new sources are zero-default, and simulated enabled collection was verified using fixtures. The new integrated collectors have not been invoked against the live APIs (previous independent public-feed probes were successful), by design. No production changes were made.
