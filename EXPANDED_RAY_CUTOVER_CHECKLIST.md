@@ -33,12 +33,12 @@ Do not confuse the user's uploaded XLSX snapshot with the live native Google She
 | Himalayas | 17 |
 | Jobicy | 3 |
 | Remote OK | 1 |
-| We Work Remotely | 1 |
-| RemoteJobs.org | 1 |
+| We Work Remotely | 3 |
+| RemoteJobs.org | 2 |
 | Adzuna | 0 |
-| **Total** | **28** |
+| **Total** | **31** |
 
-Retain RemoteJobs.org even if some days have zero viable leads, per user's explicit request. Adzuna remains a manually opted-in experiment because public API descriptions are excerpts. JobSpy remains separately parked.
+Retain RemoteJobs.org even if some days have zero viable leads, per user's explicit request. Its second page is requested only when the first page advertises more results. WWR's three distinct official RSS feeds are global latest, Product Jobs, and Customer Support Jobs; URL deduplication removes overlap, and the collector stops on provider errors. Adzuna remains a manually opted-in experiment because public API descriptions are excerpts. JobSpy remains separately parked.
 
 Language: confidently non-English/non-Greek posting is **hard-excluded** as `posting_language_excluded`; mixed, short or low-confidence text retained for conventional screening. Source location is not a language proxy.
 
