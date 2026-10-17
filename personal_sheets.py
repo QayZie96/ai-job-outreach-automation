@@ -54,6 +54,11 @@ def _view_formulas(where):
 
 VIEW_FORMULAS = {name: _view_formulas(where) for name, where in VIEW_QUERIES.items()}
 
+# Hard safety guard for this experimental branch only. Remove deliberately at
+# the separately reviewed promotion point; never write to the live master.
+MASTER_PERSONAL_RAY_SHEET_ID = "160oMgKCoAVnqaBVsPL624kwkGOOZ1Lw8n2bvhRkbitQ"
+
+
 def verify_spreadsheet_destination():
     personal = os.getenv("PERSONAL_GOOGLE_SHEET_ID", "").strip()
     original = os.getenv("GOOGLE_SHEET_ID", "").strip()
@@ -61,6 +66,8 @@ def verify_spreadsheet_destination():
         raise ValueError("PERSONAL_GOOGLE_SHEET_ID is required for --write-sheet")
     if original and personal == original:
         raise ValueError("Personal Sheet ID matches original RAY demonstration Sheet; refusing write")
+    if personal == MASTER_PERSONAL_RAY_SHEET_ID:
+        raise ValueError("Experimental run targets production Personal Ray master; refusing write")
     if len(personal) < 15:
         raise ValueError("Personal Sheet ID does not look valid")
     return personal
