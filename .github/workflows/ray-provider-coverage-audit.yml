@@ -1,4 +1,4 @@
-name: RAY stage duplicate prevention — regression
+name: RAY staging guarded publication — regression
 
 on:
   push:
