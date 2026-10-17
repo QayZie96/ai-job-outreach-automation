@@ -444,6 +444,7 @@ NON_EU_LOCATIONS = (
     "lausanne", "geneva", "nyon", "zug", "usa", "united states", "canada",
     "latam", "australia", "serbia", "norway", "israel", "india", "japan",
 )
+EU_RELOCATION_CODES = set("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split())
 BROAD_REMOTE = ("worldwide", "anywhere", "global", "fully global", "work from anywhere")
 BROAD_REGION = ("europe", "emea", "european union", "eu", "eea")
 
@@ -564,12 +565,24 @@ def preliminary_eligibility(job):
     restrictions = job.get("location_restrictions") or []
     if job.get("source") == "Himalayas" and restrictions:
         regions = {str(x).upper() for x in restrictions}
-        if not ({"GR", "GREECE"} & regions):
-            return "ineligible", "Explicit country allowlist excludes Greece"
-        return "eligible", "Greece present in provider country allowlist"
+        if {"GR", "GREECE"} & regions:
+            return "eligible", "Greece present in provider country allowlist"
+        if regions & EU_RELOCATION_CODES or any(
+                str(r).lower() in EU_COUNTRIES for r in restrictions):
+            return "uncertain", "EU-country location restriction; relocation eligibility unverified"
+        return "ineligible", "Explicit country allowlist excludes Greece and EU relocation"
     place = " ".join(str(job.get("location") or "").lower().split())
     if job.get("remote"):
         desc = description_text(job)
+        # Explicit negative hiring statements must outrank keyword-based positive
+        # Greece matches. Retain as human review because EU relocation is in scope.
+        if re.search(
+            r"\b(?:not|never)\s+hiring\s+(?:in|from)\s+greece\b|"
+            r"\b(?:do not|don't|cannot|can't)\s+hire\s+(?:in|from)\s+greece\b|"
+            r"\bgreece\s+(?:is\s+)?not\s+(?:an?\s+)?(?:eligible|supported)\s+(?:country|location)\b",
+            desc,
+        ):
+            return "uncertain", "Explicit Greece hiring exclusion; investigate EU relocation separately"
         # Some remote aggregators label every role remote, even when the
         # employer explicitly requires office presence. EU hybrid relocation
         # is in scope; a country-restricted fully remote role is not.
@@ -590,8 +603,10 @@ def preliminary_eligibility(job):
             return "uncertain", "Worldwide remote label; contract eligibility unverified"
         if _has_any(place, BROAD_REGION):
             return "uncertain", "Europe/EMEA label does not confirm hiring from Greece"
-        if _has_any(place, EU_COUNTRIES + NON_EU_LOCATIONS + EU_CITIES):
-            return "ineligible", "Remote country/location list does not include Greece"
+        if _has_any(place, EU_COUNTRIES + EU_CITIES):
+            return "uncertain", "EU-country remote restriction; potential relocation requires verification"
+        if _has_any(place, NON_EU_LOCATIONS):
+            return "ineligible", "Remote location outside Greece and EU relocation scope"
         return "uncertain", "Remote hiring location unspecified"
     if _has_any(place, NON_EU_LOCATIONS):
         return "ineligible", "On-site/hybrid location outside the EU"
