@@ -1,4 +1,4 @@
-name: RAY pilot findings screening fixes — offline regression
+name: RAY five-job pilot calibration — full regression
 
 on:
   push:
