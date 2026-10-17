@@ -66,6 +66,41 @@ def verify_spreadsheet_destination():
     return personal
 
 
+def read_existing_evaluations():
+    """Read-only staging Sheet check BEFORE any Gemini spend.
+
+    The staging workbook was copied from the Personal Ray master. Treat its
+    existing scored jobs and terminal human decisions as protected records,
+    even if the experiment's local SQLite cache/history is empty.
+    """
+    spreadsheet_id = verify_spreadsheet_destination()
+    from personal_discovery import canonical_url
+    values = _service().spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range="'Evaluations'!A2:AA"
+    ).execute().get("values", [])
+    url_index = SHEET_HEADERS.index("Job URL")
+    score_index = SHEET_HEADERS.index("AI Fit Score")
+    status_index = SHEET_HEADERS.index("Review Status")
+    decided = set()
+    scored = set()
+    existing = set()
+    for row in values:
+        if len(row) <= url_index:
+            continue
+        url = canonical_url(row[url_index])
+        if not url:
+            continue
+        existing.add(url)
+        if len(row) > score_index and str(row[score_index]).strip():
+            scored.add(url)  # Includes a genuine score of 0.
+        status = str(row[status_index]).strip().casefold() if len(row) > status_index else ""
+        if status in {"applied", "dismissed", "reviewed", "rejected", "interviewing",
+                      "offer", "withdrawn"}:
+            decided.add(url)
+    return {"existing_urls": existing, "scored_urls": scored,
+            "terminal_urls": decided}
+
+
 def _service():
     # Reuse RAY's service-account client, but never its Sheet ID or writer.
     from sheets import get_sheets_service
