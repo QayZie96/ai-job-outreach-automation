@@ -234,7 +234,11 @@ class ExistingSheetProtectionTests(unittest.TestCase):
                                     evaluator.return_value.evaluate.return_value = (
                                         [], {"gemini_calls": 0, "cache_hits": 0}
                                     )
-                                    with patch.object(sheet, "write_personal_results"):
+                                    with patch.object(
+                                        sheet, "write_personal_results",
+                                        return_value={"added": 0, "updated": 0,
+                                                      "manual_added": 0, "manual_updated": 0}
+                                    ):
                                         _, metrics = d.run(
                                             write_sheet=True,
                                             report_path=str(Path(folder) / "stage.json"),
