@@ -23,27 +23,60 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from personal_evaluation import Evaluator, PersonalCache, profile_text
+from personal_extra_feeds import (
+    normalize_remote_ok, normalize_remotejobs, normalize_wwr_rss,
+)
 from personal_screening_v41 import calibrated_factors, update_history, load_history, pending_for_review
+from personal_posting_language import unsupported_posting_language
 
 BASE = Path(__file__).resolve().parent
 ARBEITNOW = "https://www.arbeitnow.com/api/job-board-api"
 REMOTIVE = "https://remotive.com/api/remote-jobs"
 HIMALAYAS = "https://himalayas.app/jobs/api/search"
 JOBICY = "https://jobicy.com/api/v2/remote-jobs"
-ADZUNA = "https://api.adzuna.com/v1/api/jobs/gb/search/1"
+ADZUNA_ROOT = "https://api.adzuna.com/v1/api/jobs"
+# Intentional finite allowlist. Country codes refer to Adzuna's market index,
+# NOT permission for a foreign employer to hire from Greece.
+ADZUNA_MARKET_ALLOWLIST = frozenset(("at", "de", "es", "fr", "gb", "it", "nl", "pl"))
+ADZUNA_DEFAULT_MARKETS = ("de", "nl", "fr", "es")
+ADZUNA_QUERY_ALLOWLIST = frozenset((
+    "ecommerce", "operations", "marketplace", "catalogue",
+    "product data", "pricing", "implementation",
+))
+ADZUNA_DEFAULT_QUERIES = ("ecommerce", "operations")
+ADZUNA_MAX_PAGES_PER_QUERY = 2
+REMOTE_OK = "https://remoteok.com/api"
+WE_WORK_REMOTELY = "https://weworkremotely.com/remote-jobs.rss"
+REMOTEJOBS_ORG = "https://remotejobs.org/api/v1/jobs"
+REMOTEJOBS_QUERY = "operations"
 # All six Himalayas searches are intentionally broad *single-term* searches.
 # This covers core and adjacent families without multiplying keyword variants.
 # The unfiltered GR query is intentionally first to catch unexpected job titles.
 # GR may also include worldwide postings; provider metadata is not eligibility proof.
 HIMALAYAS_QUERIES = (None, "operations", "ecommerce", "automation",
                      "marketing", "analyst")
+# Experimental coverage expansion: broad page 2 first, then selected
+# high-signal niche queries. No unlimited crawl of Himalayas' global feed.
+HIMALAYAS_SECOND_PAGE_QUERIES = ("ecommerce", "marketing", "operations", "automation")
+HIMALAYAS_EXTRA_QUERIES = ("catalogue", "product data", "pricing",
+                           "procurement", "implementation")
+# Two international queries had higher verified incremental screening yield
+# than the general GR:p2 search in the bounded October 17 comparison.
+HIMALAYAS_GLOBAL_QUERIES = ("operations", "ecommerce")
 # Query-by-geography instead of restrictive combinations such as
 # tag=operations+geo=europe; keep titles and full employer descriptions locally.
 JOBICY_FILTERS = ((None, "europe"), (None, "anywhere"))
 # Fixed hard ceilings per manual run, independently of .env values.
-DEFAULT_LIMITS = {"Arbeitnow": 2, "Remotive": 1, "Adzuna": 0,
-                  "Himalayas": 6, "Jobicy": 2}
+DEFAULT_LIMITS = {"Arbeitnow": 4, "Remotive": 1, "Adzuna": 0,
+                  "Himalayas": 17, "Jobicy": 3,
+                  "Remote OK": 0, "We Work Remotely": 0, "RemoteJobs.org": 0}
 HARD_PROVIDER_LIMITS = dict(DEFAULT_LIMITS)
+# These opt-in providers have ZERO default attempts. Only their specific
+# environment flags may later authorize a tiny, separately bounded pilot.
+HARD_PROVIDER_LIMITS.update({
+    "Adzuna": 12, "Remote OK": 1,
+    "We Work Remotely": 1, "RemoteJobs.org": 2,
+})
 TARGET_TERMS = (
     "operation", "e-commerce", "ecommerce", "marketplace", "catalog",
     "merchandis", "category", "product data", "product information",
@@ -61,6 +94,31 @@ def env_int(name, default, minimum=0, maximum=50):
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def _csv_allowlist(value, allowed, label):
+    """Finite configuration; never interpolate arbitrary values into API paths."""
+    entries = tuple(piece.strip().lower() for piece in value.split(","))
+    if not entries or any(not piece or piece not in allowed for piece in entries):
+        raise ValueError(f"{label} contains an unapproved or blank value")
+    if len(entries) != len(set(entries)):
+        raise ValueError(f"{label} contains duplicate values")
+    return entries
+
+
+def adzuna_search_plan(countries, terms, page_count=1):
+    """Round-robin markets before following deeper pages; all pages bounded."""
+    if not 1 <= page_count <= ADZUNA_MAX_PAGES_PER_QUERY:
+        raise ValueError("Adzuna page count outside approved 1..2 range")
+    if not countries or not terms or any(c not in ADZUNA_MARKET_ALLOWLIST for c in countries):
+        raise ValueError("Unapproved or empty Adzuna country configuration")
+    if any(t not in ADZUNA_QUERY_ALLOWLIST for t in terms):
+        raise ValueError("Unapproved Adzuna query configuration")
+    # Country-first breadth is more useful than overcollecting one country.
+    return [(country, term, page)
+            for page in range(1, page_count + 1)
+            for country in countries
+            for term in terms]
 
 
 class ProviderError(RuntimeError):
@@ -83,7 +141,8 @@ class BudgetedHTTP:
             raise ProviderError(f"{source} stopped after 429; no further requests")
         # Retries also spend budget. Record attempt provenance without credentials.
         # Do not repeat a query after the provider explicitly rate-limits it.
-        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry"}
+        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry", "limit", "offset",
+                     "what", "sort_by", "results_per_page"}
         safe_params = {k: v for k, v in (params or {}).items() if k in safe_keys}
         for attempt in range(2):
             if self.calls[source] >= self.limits.get(source, 0):
@@ -99,23 +158,70 @@ class BudgetedHTTP:
                 entry["outcome"] = response.status_code
                 if response.status_code == 200:
                     payload = response.json()
-                    if not isinstance(payload, dict):
+                    if not isinstance(payload, dict) and not (
+                        source == "Remote OK" and isinstance(payload, list)
+                    ):
                         raise ProviderError(f"{source}: invalid response schema")
-                    entry["returned"] = len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
+                    entry["returned"] = (
+                        len(payload) if isinstance(payload, list) else
+                        len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
+                    )
                     return payload
                 if response.status_code == 429:
                     self.blocked.add(source)
                     raise ProviderError(f"{source} rate limited (429); no retry")
+                if response.status_code in {401, 403}:
+                    self.blocked.add(source)
+                    raise ProviderError(f"{source}: HTTP {response.status_code}; further requests stopped")
                 if response.status_code not in {500, 502, 503, 504}:
                     raise ProviderError(f"{source}: HTTP {response.status_code}")
                 error = f"HTTP {response.status_code}"
             except (requests.RequestException, ValueError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
+                # A network exception can embed a URL containing Adzuna's
+                # app_id/app_key. Never copy those secrets into audit logs.
+                # Exception messages can contain percent-encoded query
+                # credentials. Do not log their contents for Adzuna at all.
+                if source == "Adzuna":
+                    error = f"{type(exc).__name__}: request failed (credentials redacted)"
+                else:
+                    error = f"{type(exc).__name__}: {exc}"
             if attempt == 0 and self.calls[source] < self.limits.get(source, 0):
                 time.sleep(1)
                 continue
             raise ProviderError(f"{source}: {error}")
         raise ProviderError(f"{source}: no valid response")
+
+
+    def get_text(self, source, url):
+        """One bounded public RSS request; 429 stops the provider, no retries."""
+        if source != "We Work Remotely" or url != WE_WORK_REMOTELY:
+            raise ProviderError("Only the approved We Work Remotely RSS endpoint is allowed")
+        if source in self.blocked:
+            raise ProviderError(f"{source} stopped after rate limiting")
+        if self.calls[source] >= self.limits.get(source, 0):
+            raise ProviderError(f"{source} API request budget exhausted")
+        self.calls[source] += 1
+        entry = {"source": source, "path": urlsplit(url).path,
+                 "parameters": {}, "attempt": 1, "outcome": "request_error"}
+        self.request_log.append(entry)
+        try:
+            response = self.session.get(
+                url, timeout=20, headers={"Accept": "application/rss+xml, application/xml"}
+            )
+            entry["outcome"] = response.status_code
+            if response.status_code == 429:
+                self.blocked.add(source)
+                raise ProviderError(f"{source} rate limited (429); no retry")
+            if response.status_code != 200:
+                if response.status_code in {401, 403}:
+                    self.blocked.add(source)
+                raise ProviderError(f"{source}: HTTP {response.status_code}")
+            rss = response.text
+            if not isinstance(rss, str) or len(rss) > 5_000_000:
+                raise ProviderError(f"{source}: invalid/oversized RSS response")
+            return rss
+        except requests.RequestException as exc:
+            raise ProviderError(f"{source}: {type(exc).__name__}: {exc}") from exc
 
 
 def canonical_url(value):
@@ -227,6 +333,10 @@ def normalize_original(source, raw):
                 "job_description": original.get("description"),
                 "job_url": original.get("redirect_url"),
                 "remote": None,
+                # Adzuna's API returns description EXCERPTS, not complete
+                # requirements. A job may look relevant but hide mandatory
+                # skills, language and right-to-work constraints.
+                "description_truncated": True,
                 "tags": [],
                 "job_types": [],
                 "created_at": iso_date(original.get("created")),
@@ -279,38 +389,85 @@ def collect(http):
     except (ProviderError, KeyError, TypeError) as exc:
         errors.append(str(exc))
 
-    # The original RAY Adzuna connector is UK-only, so disable it for a
-    # Greece/EU personal search unless the operator deliberately opts in.
-    try:
-        if http.limits.get("Adzuna", 0):
+    # Multi-country Adzuna stays OFF by default. Enable with an explicit
+    # per-run budget, registered app credentials, and bounded market/query lists.
+    # Country-market membership is not Greece-remote hiring eligibility.
+    if http.limits.get("Adzuna", 0):
+        try:
             app_id, key = os.getenv("ADZUNA_APP_ID"), os.getenv("ADZUNA_APP_KEY")
             if not app_id or not key:
-                raise ProviderError("Adzuna enabled but credentials missing")
-            params = {"app_id": app_id, "app_key": key,
-                      "results_per_page": 20, "what": "business operations"}
-            payload = http.get_json("Adzuna", ADZUNA, params)
-            add("Adzuna", payload.get("results") or [], lambda raw: normalize_original("Adzuna", raw))
-    except (ProviderError, KeyError, TypeError) as exc:
-        errors.append(str(exc))
+                raise ProviderError("Adzuna enabled but app ID/key credentials missing")
+            markets = _csv_allowlist(
+                os.getenv("PERSONAL_ADZUNA_MARKETS", ",".join(ADZUNA_DEFAULT_MARKETS)),
+                ADZUNA_MARKET_ALLOWLIST, "Adzuna markets",
+            )
+            terms = _csv_allowlist(
+                os.getenv("PERSONAL_ADZUNA_TERMS", ",".join(ADZUNA_DEFAULT_QUERIES)),
+                ADZUNA_QUERY_ALLOWLIST, "Adzuna search terms",
+            )
+            pages = env_int("PERSONAL_ADZUNA_PAGES_PER_QUERY", 1, minimum=1,
+                            maximum=ADZUNA_MAX_PAGES_PER_QUERY)
+            empty_pairs = set()
+            for country, term, page in adzuna_search_plan(markets, terms, pages):
+                if (country, term) in empty_pairs:
+                    continue
+                if (http.calls["Adzuna"] >= http.limits["Adzuna"]
+                        or "Adzuna" in http.blocked):
+                    break
+                try:
+                    url = f"{ADZUNA_ROOT}/{country}/search/{page}"
+                    payload = http.get_json(
+                        "Adzuna", url,
+                        {"app_id": app_id, "app_key": key,
+                         "results_per_page": 50, "what": term, "sort_by": "date"},
+                    )
+                    rows = payload.get("results")
+                    if not isinstance(rows, list):
+                        raise ProviderError("Adzuna: malformed results list")
+                    add("Adzuna", rows,
+                        lambda raw: normalize_original("Adzuna", raw),
+                        query=f"market:{country}:what:{term}:p{page}")
+                    if not rows:
+                        # Never request page 2 of an empty page 1 query.
+                        empty_pairs.add((country, term))
+                except (ProviderError, KeyError, TypeError, ValueError) as exc:
+                    errors.append(str(exc))
+                    if "Adzuna" in http.blocked:
+                        break
+        except (ProviderError, ValueError) as exc:
+            errors.append(str(exc))
 
-    for query in HIMALAYAS_QUERIES:
+    # Six original first pages, four high-yield second pages, then selected
+    # niche Greece and international searches: exactly 17 planned requests.
+    hima_plan = (
+        [(q, 1, "GR") for q in HIMALAYAS_QUERIES]
+        + [(q, 2, "GR") for q in HIMALAYAS_SECOND_PAGE_QUERIES]
+        + [(q, 1, "GR") for q in HIMALAYAS_EXTRA_QUERIES]
+        + [(q, 1, None) for q in HIMALAYAS_GLOBAL_QUERIES]
+    )
+    for query, page, country in hima_plan:
         if (http.calls["Himalayas"] >= http.limits.get("Himalayas", 0)
                 or "Himalayas" in http.blocked):
             break
         try:
-            params = {"country": "GR", "sort": "recent", "page": 1}
+            params = {"sort": "recent", "page": page}
+            if country:
+                params["country"] = country
             if query:
                 params["q"] = query
             payload = http.get_json("Himalayas", HIMALAYAS, params)
             if payload.get("success") is False:
                 raise ProviderError("Himalayas response indicates failure")
             add("Himalayas", payload.get("jobs") or [], normalize_himalayas,
-                query=f"GR:{query or 'all'}:p1")
+                query=f"{country or 'global'}:{query or 'all'}:p{page}")
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
             if "Himalayas" in http.blocked:
                 break
 
+    # Preserve the existing two Jobicy geography probes, then optionally
+    # traverse ONE more Europe page only if the API supplies a cursor.
+    europe_cursor = None
     for tag, geo in JOBICY_FILTERS:
         if (http.calls["Jobicy"] >= http.limits.get("Jobicy", 0)
                 or "Jobicy" in http.blocked):
@@ -323,11 +480,59 @@ def collect(http):
             if payload.get("success") is False:
                 raise ProviderError(f"Jobicy: {payload.get('error', 'API failed')}")
             add("Jobicy", payload.get("jobs") or [], normalize_jobicy,
-                query=f"geo:{geo}:all")
+                query=f"geo:{geo}:p1")
+            if geo == "europe" and isinstance(payload.get("nextCursor"), str):
+                europe_cursor = payload["nextCursor"] or None
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
             if "Jobicy" in http.blocked:
                 break
+    if (europe_cursor and "Jobicy" not in http.blocked
+            and http.calls["Jobicy"] < http.limits.get("Jobicy", 0)):
+        try:
+            payload = http.get_json("Jobicy", JOBICY, {
+                "count": 200, "geo": "europe", "cursor": europe_cursor})
+            if payload.get("success") is False:
+                raise ProviderError(f"Jobicy: {payload.get('error', 'API failed')}")
+            add("Jobicy", payload.get("jobs") or [], normalize_jobicy,
+                query="geo:europe:p2")
+        except (ProviderError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+    # The following sources are deliberately opt-in, independently budgeted
+    # and reuse exactly the existing deterministic screen/dedup/history pipeline.
+    if http.limits.get("Remote OK", 0):
+        try:
+            payload = http.get_json("Remote OK", REMOTE_OK)
+            add("Remote OK", payload, normalize_remote_ok, query="unfiltered")
+        except (ProviderError, ValueError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+
+    if http.limits.get("We Work Remotely", 0):
+        try:
+            rss = http.get_text("We Work Remotely", WE_WORK_REMOTELY)
+            add("We Work Remotely", rss, normalize_wwr_rss, query="rss:all")
+        except (ProviderError, ValueError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+
+    if http.limits.get("RemoteJobs.org", 0):
+        offset = 0
+        while (http.calls["RemoteJobs.org"] < http.limits.get("RemoteJobs.org", 0)
+               and "RemoteJobs.org" not in http.blocked):
+            try:
+                payload = http.get_json("RemoteJobs.org", REMOTEJOBS_ORG, {
+                    "q": REMOTEJOBS_QUERY, "limit": 50, "offset": offset,
+                })
+                if not isinstance(payload.get("data"), list):
+                    raise ProviderError("RemoteJobs.org: missing data list")
+                add("RemoteJobs.org", payload, normalize_remotejobs,
+                    query=f"q:{REMOTEJOBS_QUERY}:offset:{offset}")
+                if not payload["data"] or not (payload.get("pagination") or {}).get("has_more"):
+                    break
+                offset += 50
+            except (ProviderError, ValueError, KeyError, TypeError) as exc:
+                errors.append(str(exc))
+                break
+
     return jobs, stats, errors
 
 
@@ -335,7 +540,8 @@ def collect(http):
 # prioritize evidence-rich roles for a bounded Gemini pass. Do NOT treat a
 # deterministic title/description keyword match as a final fit assessment.
 ROLE_TERMS = (
-    "ecommerce", "e-commerce", "e commerce", "marketplace", "catalog", "catalogue",
+    "ecommerce", "e-commerce", "e commerce", "marketplace", "marketplaces",
+    "tiktok shop", "catalog", "catalogue",
     "merchandis", "product data", "product information", "product content",
     "pricing", "inventory", "procurement", "purchasing", "supplier", "vendor",
     "fulfilment", "fulfillment", "order management", "order processing",
@@ -361,13 +567,14 @@ OUT_OF_SCOPE_TITLE = re.compile(
     r"solution|solutions|salesforce|ai)\s+(?:engineer|architect|developer)\b|"
     r"\b(?:engineer|developer|architect|scientist|copywriter|videographer|"
     r"video editor|graphic designer|product designer|\bdesigner|"
+    r"security operations analyst|soc analyst|creative strategist|"
     r"account executive|account development|sales representative|"
     r"sales development representative|business development representative|"
     r"clinical|medical|nurse|lawyer|legal counsel|"
     r"tax manager|payroll|accountant|underwriter|auditor|accounts payable|finance specialist|"
     r"chief technology officer|chief operating officer|chief executive|"
     r"intern|internship|werkstudent|working student|stage\b|"
-    r"apprentice|praktikum)\b",
+    r"apprentice|apprenticeship|praktikum|ausbildung|auszubildend\w*|azubi)\b",
     re.IGNORECASE,
 )
 GENERIC_TITLE = re.compile(
@@ -422,6 +629,7 @@ OPERATIONAL_ACTIONS = (
 NON_ENGLISH_LANGUAGE = (
     "german", "french", "dutch", "spanish", "italian", "portuguese", "polish",
     "swedish", "danish", "norwegian", "finnish", "turkish", "arabic", "japanese",
+    "chinese", "mandarin", "korean", "hindi", "armenian",
 )
 EU_COUNTRIES = (
     "austria", "belgium", "bulgaria", "croatia", "cyprus", "czechia", "czech republic",
@@ -441,9 +649,11 @@ EU_CITIES = (
 NON_EU_LOCATIONS = (
     "united kingdom", "uk", "london", "manchester", "bristol", "leeds", "oxford",
     "cambridge", "england", "scotland", "switzerland", "zurich", "zürich",
+    "wollerau", "schwyz",
     "lausanne", "geneva", "nyon", "zug", "usa", "united states", "canada",
     "latam", "australia", "serbia", "norway", "israel", "india", "japan",
 )
+EU_RELOCATION_CODES = set("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split())
 BROAD_REMOTE = ("worldwide", "anywhere", "global", "fully global", "work from anywhere")
 BROAD_REGION = ("europe", "emea", "european union", "eu", "eea")
 
@@ -555,21 +765,75 @@ def mandatory_other_language(job):
     return None
 
 
+# Only explicit *job-location restrictions* can exclude a remote ad.
+# Company headquarters, client markets and travel locations are not hiring
+# boundaries. This logic deliberately favors false negatives over guessing.
+_NON_EU_HIRING_LOCATIONS = (
+    r"philippines|mexico|brazil|united states|usa|u\.s\.a\.|us|u\.s\.|"
+    r"canada|india|malaysia|australia|switzerland|united kingdom|uk"
+)
+
+
+def explicit_non_eu_remote_restriction(job, description):
+    """Find explicit non-EU work locations in remote adverts only."""
+    if not job.get("remote"):
+        return None
+    place = " ".join(str(job.get("location") or "").lower().split())
+    if re.search(r"\bremote\s*[-–]\s*(?:us|usa|united states)\b", place):
+        return "Remote-US-only location in provider metadata"
+    patterns = (
+        rf"\blocation\s*:\s*(?:remote\s*[-–]\s*)?(?:{_NON_EU_HIRING_LOCATIONS})"
+        rf"\s*(?:\((?:fully\s+)?remote\)|[-–]\s*remote)",
+        rf"\b(?:looking\s+for|seeking|hiring)\s+(?:[\w-]+\s+){{0,3}}"
+        rf"(?:{_NON_EU_HIRING_LOCATIONS})[- ]based\s+candidates?\b",
+        rf"\bwork\s+from\s+anywhere\s+in\s+(?:the\s+)?(?:{_NON_EU_HIRING_LOCATIONS})\b",
+        rf"\bthis\s+(?:role|position)\s+(?:is|will\s+be)\s+"
+        rf"(?:remote\s+(?:within|in\s+the\s+country\s+of)|"
+        rf"(?:remote\s*,?\s*and\s+)?based\s+in)\s+"
+        rf"(?:the\s+)?(?:{_NON_EU_HIRING_LOCATIONS})\b",
+        rf"\bnearshore\s*,?\s+based\s+in\s+"
+        rf"(?:{_NON_EU_HIRING_LOCATIONS})\s+or\s+(?:{_NON_EU_HIRING_LOCATIONS})\b",
+        rf"\byou\s+must\s+be\s+(?:located|based)\s+in\s+(?:the\s+)?"
+        rf"(?:{_NON_EU_HIRING_LOCATIONS})\b",
+    )
+    if any(re.search(pattern, description, re.I) for pattern in patterns):
+        return "Employer explicitly restricts remote hiring to non-EU location"
+    return None
+
+
 def preliminary_eligibility(job):
     # Only hard-reject when metadata explicitly rules out the user's location.
     # Ambiguous locations continue as Review candidates, not Strong Matches.
     language = mandatory_other_language(job)
     if language:
         return "ineligible", f"Mandatory {language} language not in verified profile"
+    # The employer's explicit negative geographic statement outranks a broad
+    # source label, even if provider metadata also contains GR.
+    desc = description_text(job)
+    non_eu_hiring = explicit_non_eu_remote_restriction(job, desc)
+    if non_eu_hiring:
+        return "ineligible", non_eu_hiring
+    if re.search(
+        r"\b(?:not|never|no longer)\s+(?:currently\s+)?(?:hiring|recruiting)\s+(?:in|from)\s+greece\b|"
+        r"\bcurrently\s+(?:not|no longer)\s+(?:hiring|recruiting)\s+(?:in|from)\s+greece\b|"
+        r"\b(?:cannot|can't|do not|don't|unable to)\s+(?:hire|employ)\s+"
+        r"(?:candidates?\s+)?(?:in|from|based in)\s+greece\b|"
+        r"\bgreece\s+(?:is\s+)?not\s+(?:an?\s+)?(?:eligible|supported|approved)\s+(?:country|location)\b|"
+        r"\b(?:except|excluding)\s+greece\b",
+        desc,
+    ):
+        return "uncertain", "Explicit Greece hiring exclusion; investigate EU relocation separately"
     restrictions = job.get("location_restrictions") or []
     if job.get("source") == "Himalayas" and restrictions:
         regions = {str(x).upper() for x in restrictions}
-        if not ({"GR", "GREECE"} & regions):
-            return "ineligible", "Explicit country allowlist excludes Greece"
-        return "eligible", "Greece present in provider country allowlist"
+        if {"GR", "GREECE"} & regions:
+            return "eligible", "Greece present in provider country allowlist"
+        if regions & EU_RELOCATION_CODES or any(
+                str(r).lower() in EU_COUNTRIES for r in restrictions):
+            return "uncertain", "EU-country location restriction; relocation eligibility unverified"
+        return "ineligible", "Explicit country allowlist excludes Greece and EU relocation"
     place = " ".join(str(job.get("location") or "").lower().split())
     if job.get("remote"):
-        desc = description_text(job)
         # Some remote aggregators label every role remote, even when the
         # employer explicitly requires office presence. EU hybrid relocation
         # is in scope; a country-restricted fully remote role is not.
@@ -590,8 +854,10 @@ def preliminary_eligibility(job):
             return "uncertain", "Worldwide remote label; contract eligibility unverified"
         if _has_any(place, BROAD_REGION):
             return "uncertain", "Europe/EMEA label does not confirm hiring from Greece"
-        if _has_any(place, EU_COUNTRIES + NON_EU_LOCATIONS + EU_CITIES):
-            return "ineligible", "Remote country/location list does not include Greece"
+        if _has_any(place, EU_COUNTRIES + EU_CITIES):
+            return "uncertain", "EU-country remote restriction; potential relocation requires verification"
+        if _has_any(place, NON_EU_LOCATIONS):
+            return "ineligible", "Remote location outside Greece and EU relocation scope"
         return "uncertain", "Remote hiring location unspecified"
     if _has_any(place, NON_EU_LOCATIONS):
         return "ineligible", "On-site/hybrid location outside the EU"
@@ -619,12 +885,8 @@ def candidate_priority(job):
     desc = description_text(job)
     if re.search(r"\b(?:8\+|10\+|12\+)\s+years?\b", desc):
         score -= 10
-    # A German-language description is not proof of a strict requirement;
-    # review it, but rank it below explicit English-language opportunities.
-    words = re.findall(r"[a-zäöüß]+", desc[:3000])
-    if len(words) >= 40 and sum(w in {"und", "der", "die", "das", "du", "deine", "mit", "wir", "bei"}
-                                 for w in words) / len(words) > 0.05:
-        score -= 25
+    # The posting-language gate is applied in screen_candidates, before
+    # ranking. No separate German-only soft penalty should conflict with it.
     if "intern" in title or "part-time" in title:
         score -= 10
     return score
@@ -672,14 +934,29 @@ def screen_candidates(jobs, audit=None):
         status, reason = preliminary_eligibility(job) if role_score else ("not_checked", "role excluded before eligibility check")
         if role_score and factors["hard_exclusion"] == "mandatory_language":
             status, reason = "ineligible", factors["reason"] + " required by posting"
+        # Posting language is a user-defined application eligibility filter,
+        # NOT an unsupported inference of a formal language requirement.
+        # Run on actual description prose (no title, location or publisher).
+        posting_language, language_evidence = unsupported_posting_language(
+            description_text(job)
+        ) if role_score else (None, "")
+        if posting_language and role_score and factors["hard_exclusion"] != "mandatory_language":
+            status = "ineligible"
+            reason = (f"Posting language not supported: {posting_language}. "
+                      f"{language_evidence}")
 
-        senior_executive = bool(re.search(r"\b(?:director|head of|vice president|vp|chief of staff)\b",
+        senior_executive = bool(re.search(r"\b(?:director|head of|group head|vice president|vp|chief of staff)\b",
                                           str(job.get("job_title") or ""), re.IGNORECASE))
         title = str(job.get("job_title") or "").lower()
         # Keep adjacent marketing/data/web opportunities visible; don't promote
         # them into an AI shortlist on generic company-description matches.
         transferable_only = _has_any(title, TRANSFERABLE_REVIEW_TITLES) and not _has_any(title, ROLE_TERMS)
-        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only or factors["force_review"]))
+        # Adzuna's public API returns snippets, never guaranteed complete
+        # descriptions. Do not pay Gemini to judge hidden qualifications.
+        excerpt_only = (job.get("source") == "Adzuna"
+                        and job.get("description_truncated", True))
+        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only
+                                           or factors["force_review"] or excerpt_only))
         outcome = "review_only" if exploratory else "candidate"
         if not role_score:
             counts["role_out_of_scope"] += 1
@@ -690,7 +967,10 @@ def screen_candidates(jobs, audit=None):
             reason = factors["reason"]
             status = "ineligible"
         elif status == "ineligible":
-            key = "mandatory_language" if reason.startswith(("Mandatory", "Advanced mandatory")) else "geography"
+            key = ("posting_language" if reason.startswith("Posting language not supported:")
+                   else "mandatory_language" if factors["hard_exclusion"] == "mandatory_language"
+                   or reason.startswith(("Mandatory", "Advanced mandatory"))
+                   else "geography")
             counts[key + "_excluded"] += 1
             rejects[(job.get("source", ""), key)] += 1
             outcome = key + "_excluded"
@@ -703,6 +983,9 @@ def screen_candidates(jobs, audit=None):
             if role_reason.startswith("transferable role"):
                 job["priority"] += 18
             job["fit_flags"] = list(factors["flags"])
+            if excerpt_only:
+                job["description_truncated"] = True
+                job["fit_flags"].append("adzuna_excerpt_requirements_unverified")
             survivors.append(job)
             counts["eligible" if status == "eligible" else "uncertain"] += 1
             if exploratory:
@@ -786,11 +1069,14 @@ def write_report(path, jobs, raw_stats, calls, errors, evaluation_stats):
 
 def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json", session=None):
     load_dotenv(BASE / ".env")
-    limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 2, maximum=2),
+    limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 4, maximum=4),
               "Remotive": env_int("PERSONAL_MAX_REMOTIVE_CALLS", 1, maximum=1),
-              "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=0),
-              "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 6, maximum=6),
-              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 2, maximum=2)}
+              "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=12),
+              "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 17, maximum=17),
+              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 3, maximum=3),
+              "Remote OK": env_int("PERSONAL_MAX_REMOTE_OK_CALLS", 0, maximum=1),
+              "We Work Remotely": env_int("PERSONAL_MAX_WWR_CALLS", 0, maximum=1),
+              "RemoteJobs.org": env_int("PERSONAL_MAX_REMOTEJOBS_ORG_CALLS", 0, maximum=2)}
     max_ai = env_int("PERSONAL_MAX_GEMINI_CALLS", 5, maximum=10)
     if write_sheet and collect_only:
         raise ValueError("Cannot write unevaluated jobs to Sheets")
@@ -814,8 +1100,17 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
         job["discovery_status"] = "previously_seen" if old else "new"
         job["review_status"] = old.get("review_status", "pending")
         job["ai_judged"] = bool(old.get("ai_judged", False))
+    # The experiment's local history may be empty, but the copied staging
+    # Sheet already contains assessed Personal Ray vacancies. Never spend
+    # Gemini calls on these existing decisions or assessed URLs.
+    protected_sheet = {"existing_urls": set(), "scored_urls": set(), "terminal_urls": set()}
+    if write_sheet:
+        from personal_sheets import read_existing_evaluations
+        protected_sheet = read_existing_evaluations()  # read-only; fail closed if inaccessible
+    protected_urls = protected_sheet["scored_urls"] | protected_sheet["terminal_urls"]
     pending_candidates = [job for job in candidates
-                          if pending_for_review(history_before, job)]
+                          if pending_for_review(history_before, job)
+                          and job["job_url"] not in protected_urls]
     selection_limit = env_int("PERSONAL_MAX_AI_CANDIDATES", 40, minimum=1, maximum=100)
     scoring_pool = [job for job in pending_candidates if not job.get("review_only")]
     shortlist = prioritize_candidates(scoring_pool, selection_limit)
@@ -842,6 +1137,12 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
                   "exploratory_review_only": len(pending_candidates) - len(scoring_pool),
                   "pending_for_review": len(pending_candidates),
                   "already_judged_skipped": len(candidates) - len(pending_candidates),
+                  "staging_scored_urls": len(protected_sheet["scored_urls"]),
+                  "staging_terminal_urls": len(protected_sheet["terminal_urls"]),
+                  "candidates_protected_from_repeat_ai": sum(
+                      j["job_url"] in protected_urls for j in candidates),
+                  "staging_known_candidate_urls": sum(
+                      j["job_url"] in protected_sheet["existing_urls"] for j in candidates),
                   "new_candidates": sum(j["discovery_status"] == "new" for j in pending_candidates),
                   "new_postings": sum(row["seen_before"] is False for row in audit),
                   "deferred_by_selection_limit": len(scoring_pool) - len(shortlist),
@@ -862,7 +1163,15 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     # Otherwise a completed-but-unpublished job would be silently skipped.
     if write_sheet:
         from personal_sheets import write_personal_results
-        write_personal_results(completed, stats, http.calls, errors, eval_stats)
+        # Persist exploratory/manual-review-only vacancies separately from AI
+        # Evaluations. Human Review Status and Notes are preserved by URL.
+        manual_jobs = [job for job in candidates
+                       if job.get("review_only")
+                       and job["job_url"] not in protected_sheet["existing_urls"]]
+        sheet_stats = write_personal_results(
+            completed, stats, http.calls, errors, eval_stats, manual_jobs=manual_jobs
+        )
+        eval_stats["sheet"] = sheet_stats
     eval_stats["history"] = update_history(history_file, unique, evaluated_urls=judged_now)
     eval_stats["history_file"] = str(history_file)
     path = write_report(report_path, completed, stats, http.calls, errors, eval_stats)
@@ -873,13 +1182,109 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     return completed, eval_stats
 
 
+def evaluate_saved_collection_report(source_report, *, output_path=None):
+    """One explicit Gemini batch from a prior collect-only JSON report.
+
+    No job-board HTTP, no provider history changes, no production Sheet writes,
+    and never more than one Gemini API request, even on cache misses.
+    """
+    report = Path(source_report)
+    raw = json.loads(report.read_text(encoding="utf-8"))
+    collected = raw.get("evaluated_jobs")
+    if not isinstance(collected, list) or not isinstance(raw.get("evaluation"), dict):
+        raise ValueError("Not a recognized Personal RAY collection report")
+    if any(not isinstance(j, dict) or "assessment" in j for j in collected):
+        raise ValueError("Input must be an unassessed --collect-only report")
+
+    from personal_sheets import (
+        verify_spreadsheet_destination, read_existing_evaluations,
+        write_personal_results,
+    )
+    # Preflight before paid API work. Ensure we cannot use the master workbook.
+    verify_spreadsheet_destination()
+    protected = read_existing_evaluations()
+    if os.getenv("PERSONAL_GEMINI_FREE_TIER_CONFIRMED") != "YES":
+        raise RuntimeError("Explicit Gemini Free Tier confirmation required for staged evaluation")
+    profile = profile_text()  # fail before Gemini on missing local profile
+
+    # Reclassify the frozen set with CURRENT deterministic rules, not the
+    # potentially stale review_only flags from the original collection.
+    rescored, precheck, _ = screen_candidates(
+        deduplicate([dict(j) for j in collected])
+    )
+    terminal = protected["scored_urls"] | protected["terminal_urls"]
+    # Never promote jobs that were explicitly in the manual-only queue in the
+    # source report, even if a later rule would rank them higher.
+    pending = [
+        j for j in rescored if not j.get("review_only")
+        and not next(
+            (old.get("review_only", False) for old in collected
+             if canonical_url(old.get("job_url")) == j["job_url"]), False
+        )
+        and j["job_url"] not in terminal
+    ]
+    selected = prioritize_candidates(pending, limit=5)
+    # Cap the remote Gemini budget IN CODE: not user .env MAX_GEMINI_CALLS.
+    evaluator = Evaluator(profile, PersonalCache(), max_calls=1)
+    results, ai = evaluator.evaluate(selected)
+    if ai.get("gemini_calls", 0) > 1:
+        raise RuntimeError("One-batch Gemini hard ceiling exceeded")
+    stats = {
+        "mode": "offline_existing_report_one_gemini_batch",
+        "source_report": report.name,
+        "screened_again": len(rescored),
+        "precheck": dict(precheck),
+        "already_scored_in_staging": len(protected["scored_urls"]),
+        "protected_from_repeat_ai": sum(j["job_url"] in terminal for j in rescored),
+        "gemini_input_count": len(selected),
+        "gemini_selected_urls": [j["job_url"] for j in selected],
+        **ai,
+    }
+    # Do not rewrite Manual Review, repeat source collection, or rejudge
+    # historical production rows. Cache results survive Sheet failure.
+    if results:
+        published = write_personal_results(
+            results, Counter(j["source"] for j in selected),
+            Counter(), [], stats, manual_jobs=[]
+        )
+        stats["sheet"] = published
+    else:
+        stats["sheet"] = {"added": 0, "updated": 0, "manual_added": 0,
+                          "manual_updated": 0}
+    destination = Path(output_path) if output_path else report.with_name(
+        report.stem + "_gemini_pilot.json")
+    write_report(destination, results, Counter(j["source"] for j in selected),
+                 Counter(), [], stats)
+    print(f"Staging Gemini pilot: {len(selected)} jobs selected, "
+          f"{ai.get('gemini_calls', 0)} Gemini calls, {len(results)} evaluated. "
+          f"Staging rows: {stats['sheet']}. Report: {destination}")
+    return results, stats
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Explicitly allow live provider/API calls")
     parser.add_argument("--collect-only", action="store_true", help="Skip Gemini and Sheets")
     parser.add_argument("--write-sheet", action="store_true", help="Append to NEW personal Sheet")
     parser.add_argument("--report", default="personal_run.json")
+    parser.add_argument("--publish-manual-report", metavar="JSON_PATH", default=None,
+                        help="Offline staging Sheet upsert of manual leads from collect-only report")
+    parser.add_argument("--evaluate-report", metavar="JSON_PATH", default=None,
+                        help="Rescreen frozen collection; at most 1 Gemini batch, staging Sheet only")
     args = parser.parse_args()
-    if not args.live:
-        parser.error("Pass --live to authorize bounded API calls (no scheduling)")
-    run(collect_only=args.collect_only, write_sheet=args.write_sheet, report_path=args.report)
+    if args.publish_manual_report or args.evaluate_report:
+        if args.live or args.collect_only or args.write_sheet:
+            parser.error("Offline report modes cannot be combined with collection/AI flags")
+        if args.publish_manual_report and args.evaluate_report:
+            parser.error("Choose only one offline report mode")
+        load_dotenv(BASE / ".env")
+        if args.publish_manual_report:
+            from personal_sheets import publish_manual_only_from_report
+            result = publish_manual_only_from_report(args.publish_manual_report)
+            print(f"Manual-only staging publication complete: {result}")
+        else:
+            evaluate_saved_collection_report(args.evaluate_report)
+    else:
+        if not args.live:
+            parser.error("Pass --live to authorize bounded API calls (no scheduling)")
+        run(collect_only=args.collect_only, write_sheet=args.write_sheet, report_path=args.report)
