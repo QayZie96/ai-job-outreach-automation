@@ -1,4 +1,4 @@
-name: RAY five-job pilot calibration — full regression
+name: RAY optional feeds geography calibration — offline tests
 
 on:
   push:
