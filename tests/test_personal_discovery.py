@@ -132,6 +132,12 @@ class Tests(unittest.TestCase):
                 "GEMINI_API_KEY": "", "PERSONAL_MAX_ARBEITNOW_CALLS": "1",
                 "PERSONAL_MAX_REMOTIVE_CALLS": "1", "PERSONAL_MAX_ADZUNA_CALLS": "0",
                 "PERSONAL_MAX_HIMALAYAS_CALLS": "0", "PERSONAL_MAX_JOBICY_CALLS": "0",
+                # Explicitly disable *all* optional collectors for this two-
+                # response fixture. Local ignored .env may enable them; the
+                # test must not depend on a developer's current source budget.
+                "PERSONAL_MAX_REMOTE_OK_CALLS": "0",
+                "PERSONAL_MAX_WWR_CALLS": "0",
+                "PERSONAL_MAX_REMOTEJOBS_ORG_CALLS": "0",
             }):
                 out, stats = d.run(collect_only=True, session=session, report_path=str(report))
             self.assertEqual(len(out), 2)
@@ -330,9 +336,9 @@ class Tests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertTrue(d.target_role({**noise, "job_title": title}))
 
-    def test_geo_filter_requires_greece_for_country_restricted_remote(self):
+    def test_geo_filter_distinguishes_greece_remote_from_eu_relocation(self):
         j = {**JOB, "location": "Netherlands", "remote": True}
-        self.assertEqual(d.preliminary_eligibility(j)[0], "ineligible")
+        self.assertEqual(d.preliminary_eligibility(j)[0], "uncertain")
         j["location"] = "Europe"
         self.assertEqual(d.preliminary_eligibility(j)[0], "uncertain")
         j["location"] = "Anywhere"
@@ -545,6 +551,8 @@ class Tests(unittest.TestCase):
                 result.execute.return_value = {"values": [sheet.SHEET_HEADERS]}
             elif kwargs["range"].startswith("'Run Summary'!"):
                 result.execute.return_value = {"values": [sheet.RUN_HEADERS]}
+            elif kwargs["range"].startswith("'Manual Review'!"):
+                result.execute.return_value = {"values": [sheet.MANUAL_HEADERS]}
             elif kwargs["range"].endswith("!A2") or kwargs["range"].endswith("!D2"):
                 result.execute.return_value = {"values": []}
             elif kwargs["range"].endswith("!C2"):
@@ -563,6 +571,54 @@ class Tests(unittest.TestCase):
                             for c in values.get.call_args_list
                             if c.kwargs["range"].endswith("!A2")))
         self.assertNotIn("'Evaluations'!1:1", ranges)
+
+    def test_manual_review_rows_unscored_and_human_fields_preserved(self):
+        base = {**JOB, "review_only": True, "priority": 47,
+                "precheck_eligibility": "uncertain",
+                "precheck_reason": "EU-country remote restriction; potential relocation requires verification",
+                "role_evidence_reason": "Transferable ecommerce operations"}
+        first = sheet._manual_review_row(base, today="2026-10-17")
+        h = sheet.MANUAL_HEADERS
+        self.assertEqual(first[h.index("AI Status")], "Not AI evaluated — manual triage")
+        self.assertEqual(first[h.index("Review Status")], "New")
+        self.assertEqual(first[h.index("Work Arrangement")], "EU relocation review")
+        self.assertTrue(first[0].startswith("RAY-"))
+        prior = list(first)
+        prior[h.index("Review Status")] = "Dismissed"
+        prior[h.index("Notes")] = "Employer requires local contract."
+        update = sheet._manual_review_row(
+            {**base, "priority": 31}, prior, today="2026-10-18")
+        self.assertEqual(update[h.index("First Seen")], "2026-10-17")
+        self.assertEqual(update[h.index("Last Seen")], "2026-10-18")
+        self.assertEqual(update[h.index("Review Status")], "Dismissed")
+        self.assertEqual(update[h.index("Notes")], "Employer requires local contract.")
+        self.assertEqual(update[h.index("Deterministic Priority")], 31)
+        self.assertEqual(update[h.index("Vacancy ID")], first[0])
+        with self.assertRaises(ValueError):
+            sheet._manual_review_row({**base, "review_only": False})
+
+    def test_manual_review_writer_deduplicates_and_never_overwrites_human_columns(self):
+        from unittest.mock import MagicMock
+        service = MagicMock()
+        values = service.spreadsheets.return_value.values.return_value
+        job = {**JOB, "review_only": True, "priority": 42,
+               "precheck_eligibility": "uncertain",
+               "precheck_reason": "EU relocation needed"}
+        first = sheet._manual_review_row(job, today="2026-10-15")
+        first[sheet.MANUAL_HEADERS.index("Notes")] = "Do not apply"
+        first[sheet.MANUAL_HEADERS.index("Review Status")] = "Dismissed"
+        values.get.return_value.execute.return_value = {"values": [first]}
+        result = sheet._write_manual_review(service, "TEST", [job, dict(job)])
+        self.assertEqual(result, {"manual_added": 0, "manual_updated": 1})
+        values.append.assert_not_called()
+        payload = values.batchUpdate.call_args.kwargs["body"]
+        self.assertEqual(payload["valueInputOption"], "RAW")
+        self.assertEqual(len(payload["data"]), 1)
+        row = payload["data"][0]["values"][0]
+        self.assertEqual(row[sheet.MANUAL_HEADERS.index("Notes")], "Do not apply")
+        self.assertEqual(row[sheet.MANUAL_HEADERS.index("Review Status")], "Dismissed")
+        self.assertEqual(row[sheet.MANUAL_HEADERS.index("AI Status")],
+                         "Not AI evaluated — manual triage")
 
     def test_human_first_sheet_mapping_and_stable_id(self):
         job = {**JOB, "assessment": ev.classify(dict(VALID), JOB)}
@@ -650,10 +706,46 @@ class Tests(unittest.TestCase):
         self.assertTrue({"operations", "ecommerce", "automation", "marketing", "analyst"}
                         <= set(d.HIMALAYAS_QUERIES))
         self.assertEqual(d.JOBICY_FILTERS, ((None, "europe"), (None, "anywhere")))
+        self.assertEqual(len(d.HIMALAYAS_EXTRA_QUERIES), 5)
+        self.assertEqual(sum(d.DEFAULT_LIMITS.values()), 25)
         with self.assertRaises(ValueError):
-            d.BudgetedHTTP({"Himalayas": 7})
+            d.BudgetedHTTP({"Himalayas": 18})
         with self.assertRaises(ValueError):
-            d.BudgetedHTTP({"Adzuna": 1})
+            d.BudgetedHTTP({"Adzuna": 13})
+
+    def test_expanded_himalayas_plan_stays_bounded_and_ordered(self):
+        session = FakeSession([FakeResponse(200, {"success": True, "jobs": []}) for _ in range(17)])
+        http = d.BudgetedHTTP({"Arbeitnow": 0, "Remotive": 0, "Adzuna": 0,
+                               "Himalayas": 17, "Jobicy": 0}, session)
+        jobs, stats, errors = d.collect(http)
+        self.assertEqual(jobs, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(http.calls["Himalayas"], 17)
+        requests = [c[1]["params"] for c in session.calls]
+        self.assertTrue(all(q["page"] == 1 for q in requests[:6]))
+        self.assertTrue(all(q["page"] == 2 for q in requests[6:10]))
+        self.assertEqual([q.get("q") for q in requests[6:10]],
+                         list(d.HIMALAYAS_SECOND_PAGE_QUERIES))
+        self.assertEqual([q.get("q") for q in requests[10:15]],
+                         list(d.HIMALAYAS_EXTRA_QUERIES))
+        self.assertTrue(all(q.get("country") == "GR" for q in requests[:15]))
+        self.assertEqual([q.get("q") for q in requests[15:]],
+                         list(d.HIMALAYAS_GLOBAL_QUERIES))
+        self.assertTrue(all("country" not in q for q in requests[15:]))
+
+    def test_jobicy_cursor_pagination_requires_provider_token(self):
+        session = FakeSession([
+            FakeResponse(200, {"success": True, "jobs": [], "nextCursor": "OPAQUE"}),
+            FakeResponse(200, {"success": True, "jobs": [], "nextCursor": None}),
+            FakeResponse(200, {"success": True, "jobs": [], "hasMore": False}),
+        ])
+        http = d.BudgetedHTTP({"Arbeitnow": 0, "Remotive": 0, "Adzuna": 0,
+                               "Himalayas": 0, "Jobicy": 3}, session)
+        d.collect(http)
+        self.assertEqual(http.calls["Jobicy"], 3)
+        self.assertEqual(session.calls[2][1]["params"],
+                         {"count": 200, "geo": "europe", "cursor": "OPAQUE"})
+        self.assertTrue(all("cursor" not in x.get("parameters", {}) for x in http.request_log))
 
     def test_provider_queries_and_429_abort_only_rate_limited_provider(self):
         session = FakeSession([
