@@ -33,7 +33,17 @@ ARBEITNOW = "https://www.arbeitnow.com/api/job-board-api"
 REMOTIVE = "https://remotive.com/api/remote-jobs"
 HIMALAYAS = "https://himalayas.app/jobs/api/search"
 JOBICY = "https://jobicy.com/api/v2/remote-jobs"
-ADZUNA = "https://api.adzuna.com/v1/api/jobs/gb/search/1"
+ADZUNA_ROOT = "https://api.adzuna.com/v1/api/jobs"
+# Intentional finite allowlist. Country codes refer to Adzuna's market index,
+# NOT permission for a foreign employer to hire from Greece.
+ADZUNA_MARKET_ALLOWLIST = frozenset(("at", "de", "es", "fr", "gb", "it", "nl", "pl"))
+ADZUNA_DEFAULT_MARKETS = ("de", "nl", "fr", "es")
+ADZUNA_QUERY_ALLOWLIST = frozenset((
+    "ecommerce", "operations", "marketplace", "catalogue",
+    "product data", "pricing", "implementation",
+))
+ADZUNA_DEFAULT_QUERIES = ("ecommerce", "operations")
+ADZUNA_MAX_PAGES_PER_QUERY = 2
 REMOTE_OK = "https://remoteok.com/api"
 WE_WORK_REMOTELY = "https://weworkremotely.com/remote-jobs.rss"
 REMOTEJOBS_ORG = "https://remotejobs.org/api/v1/jobs"
@@ -62,7 +72,10 @@ DEFAULT_LIMITS = {"Arbeitnow": 4, "Remotive": 1, "Adzuna": 0,
 HARD_PROVIDER_LIMITS = dict(DEFAULT_LIMITS)
 # These opt-in providers have ZERO default attempts. Only their specific
 # environment flags may later authorize a tiny, separately bounded pilot.
-HARD_PROVIDER_LIMITS.update({"Remote OK": 1, "We Work Remotely": 1, "RemoteJobs.org": 2})
+HARD_PROVIDER_LIMITS.update({
+    "Adzuna": 12, "Remote OK": 1,
+    "We Work Remotely": 1, "RemoteJobs.org": 2,
+})
 TARGET_TERMS = (
     "operation", "e-commerce", "ecommerce", "marketplace", "catalog",
     "merchandis", "category", "product data", "product information",
@@ -80,6 +93,31 @@ def env_int(name, default, minimum=0, maximum=50):
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def _csv_allowlist(value, allowed, label):
+    """Finite configuration; never interpolate arbitrary values into API paths."""
+    entries = tuple(piece.strip().lower() for piece in value.split(","))
+    if not entries or any(not piece or piece not in allowed for piece in entries):
+        raise ValueError(f"{label} contains an unapproved or blank value")
+    if len(entries) != len(set(entries)):
+        raise ValueError(f"{label} contains duplicate values")
+    return entries
+
+
+def adzuna_search_plan(countries, terms, page_count=1):
+    """Round-robin markets before following deeper pages; all pages bounded."""
+    if not 1 <= page_count <= ADZUNA_MAX_PAGES_PER_QUERY:
+        raise ValueError("Adzuna page count outside approved 1..2 range")
+    if not countries or not terms or any(c not in ADZUNA_MARKET_ALLOWLIST for c in countries):
+        raise ValueError("Unapproved or empty Adzuna country configuration")
+    if any(t not in ADZUNA_QUERY_ALLOWLIST for t in terms):
+        raise ValueError("Unapproved Adzuna query configuration")
+    # Country-first breadth is more useful than overcollecting one country.
+    return [(country, term, page)
+            for page in range(1, page_count + 1)
+            for country in countries
+            for term in terms]
 
 
 class ProviderError(RuntimeError):
@@ -134,7 +172,14 @@ class BudgetedHTTP:
                     raise ProviderError(f"{source}: HTTP {response.status_code}")
                 error = f"HTTP {response.status_code}"
             except (requests.RequestException, ValueError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
+                # A network exception can embed a URL containing Adzuna's
+                # app_id/app_key. Never copy those secrets into audit logs.
+                detail = str(exc)
+                for secret_key in ("app_id", "app_key"):
+                    secret = (params or {}).get(secret_key)
+                    if secret:
+                        detail = detail.replace(str(secret), "[REDACTED]")
+                error = f"{type(exc).__name__}: {detail}"
             if attempt == 0 and self.calls[source] < self.limits.get(source, 0):
                 time.sleep(1)
                 continue
@@ -335,19 +380,50 @@ def collect(http):
     except (ProviderError, KeyError, TypeError) as exc:
         errors.append(str(exc))
 
-    # The original RAY Adzuna connector is UK-only, so disable it for a
-    # Greece/EU personal search unless the operator deliberately opts in.
-    try:
-        if http.limits.get("Adzuna", 0):
+    # Multi-country Adzuna stays OFF by default. Enable with an explicit
+    # per-run budget, registered app credentials, and bounded market/query lists.
+    # Country-market membership is not Greece-remote hiring eligibility.
+    if http.limits.get("Adzuna", 0):
+        try:
             app_id, key = os.getenv("ADZUNA_APP_ID"), os.getenv("ADZUNA_APP_KEY")
             if not app_id or not key:
-                raise ProviderError("Adzuna enabled but credentials missing")
-            params = {"app_id": app_id, "app_key": key,
-                      "results_per_page": 20, "what": "business operations"}
-            payload = http.get_json("Adzuna", ADZUNA, params)
-            add("Adzuna", payload.get("results") or [], lambda raw: normalize_original("Adzuna", raw))
-    except (ProviderError, KeyError, TypeError) as exc:
-        errors.append(str(exc))
+                raise ProviderError("Adzuna enabled but app ID/key credentials missing")
+            markets = _csv_allowlist(
+                os.getenv("PERSONAL_ADZUNA_MARKETS", ",".join(ADZUNA_DEFAULT_MARKETS)),
+                ADZUNA_MARKET_ALLOWLIST, "Adzuna markets",
+            )
+            terms = _csv_allowlist(
+                os.getenv("PERSONAL_ADZUNA_TERMS", ",".join(ADZUNA_DEFAULT_QUERIES)),
+                ADZUNA_QUERY_ALLOWLIST, "Adzuna search terms",
+            )
+            pages = env_int("PERSONAL_ADZUNA_PAGES_PER_QUERY", 1, minimum=1,
+                            maximum=ADZUNA_MAX_PAGES_PER_QUERY)
+            for country, term, page in adzuna_search_plan(markets, terms, pages):
+                if (http.calls["Adzuna"] >= http.limits["Adzuna"]
+                        or "Adzuna" in http.blocked):
+                    break
+                try:
+                    url = f"{ADZUNA_ROOT}/{country}/search/{page}"
+                    payload = http.get_json(
+                        "Adzuna", url,
+                        {"app_id": app_id, "app_key": key,
+                         "results_per_page": 50, "what": term, "sort_by": "date"},
+                    )
+                    rows = payload.get("results")
+                    if not isinstance(rows, list):
+                        raise ProviderError("Adzuna: malformed results list")
+                    add("Adzuna", rows,
+                        lambda raw: normalize_original("Adzuna", raw),
+                        query=f"market:{country}:what:{term}:p{page}")
+                    if not rows:
+                        # Empty market/term combinations need no further pages.
+                        continue
+                except (ProviderError, KeyError, TypeError, ValueError) as exc:
+                    errors.append(str(exc))
+                    if "Adzuna" in http.blocked:
+                        break
+        except (ProviderError, ValueError) as exc:
+            errors.append(str(exc))
 
     # Six original first pages, four high-yield second pages, then selected
     # niche Greece and international searches: exactly 17 planned requests.
@@ -923,7 +999,7 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
     load_dotenv(BASE / ".env")
     limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 4, maximum=4),
               "Remotive": env_int("PERSONAL_MAX_REMOTIVE_CALLS", 1, maximum=1),
-              "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=0),
+              "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=12),
               "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 17, maximum=17),
               "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 3, maximum=3),
               "Remote OK": env_int("PERSONAL_MAX_REMOTE_OK_CALLS", 0, maximum=1),
