@@ -81,6 +81,29 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(classified["eligibility"], "uncertain")
         self.assertEqual(classified["decision"], "Review")
 
+    def test_negative_hiring_overrides_himalayas_gr_country(self):
+        target = job(location="Greece")
+        target["location_restrictions"] = ["GR"]
+        for text in (
+            "We are currently not hiring in Greece.",
+            "We do not hire candidates based in Greece.",
+            "The role is open everywhere except Greece.",
+        ):
+            with self.subTest(text=text):
+                target["job_description"] = text
+                status, reason = ray.preliminary_eligibility(target)
+                self.assertEqual(status, "uncertain", reason)
+
+    def test_staff_and_principal_roles_stay_visible_as_review_only(self):
+        for title in ("Staff Product Manager – E-Commerce", "Principal Marketplace Operations Specialist"):
+            with self.subTest(title=title):
+                target = job(title=title, location="Greece")
+                rows, survivors, _, _, _, _ = audit.count_outcomes([target])
+                self.assertEqual(len(survivors), 1)
+                self.assertTrue(survivors[0]["review_only"])
+                self.assertEqual(rows[0]["screen_outcome"], "review_only")
+                self.assertIn("advanced_individual_contributor_seniority", rows[0]["fit_flags"])
+
     def test_invalid_host_blocks_provider_before_network(self):
         http = audit.AuditHTTP(session=FakeSession([]), sleep=0)
         self.assertIsNone(http.get("Himalayas", "https://example.com/api"))
