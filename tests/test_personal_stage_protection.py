@@ -268,6 +268,81 @@ class CalibrationTests(unittest.TestCase):
         # is a valid pre-AI exclusion. The Chinese language itself is proven.
         self.assertEqual(sum(counts.values()), 1)
 
+    def test_adzuna_snippets_never_go_to_gemini(self):
+        cases = [
+            ("eCommerce Manager - GSA", "The Orchard",
+             "The E-Commerce Manager is responsible for driving growth. " * 9),
+            ("eCommerce Data Analyst (m/w/d)", "Melitta Gruppe",
+             "Über uns Du willst etwas bewegen und die Zukunft nachhaltig gestalten. " * 9),
+        ]
+        for title, company, desc in cases:
+            with self.subTest(title=title):
+                j = job(title, desc[:500], source="Adzuna",
+                        company_name=company, location="Berlin, Deutschland",
+                        remote=None, description_truncated=True)
+                kept, _, _ = d.screen_candidates([j])
+                self.assertEqual(len(kept), 1)
+                self.assertTrue(kept[0]["review_only"])
+                self.assertTrue(kept[0]["description_truncated"])
+                self.assertIn("adzuna_excerpt_requirements_unverified",
+                              kept[0]["fit_flags"])
+
+    def test_adzuna_legacy_snippet_without_flag_is_also_manual(self):
+        j = job("eCommerce Manager", "Manage a DTC shop",
+                source="Adzuna", remote=None,
+                location="Berlin, Deutschland")
+        kept, _, _ = d.screen_candidates([j])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["review_only"])
+        self.assertIn("adzuna_excerpt_requirements_unverified", kept[0]["fit_flags"])
+
+    def test_adzuna_ausbildung_is_not_job_application_candidate(self):
+        j = job("Ausbildung zum Kaufmann für E-Commerce (m/w/d)",
+                "Drei Jahre Ausbildung mit Berufsschule und IHK Abschluss.",
+                source="Adzuna", remote=None,
+                location="Essen, Nordrhein-Westfalen",
+                description_truncated=True)
+        kept, counts, _ = d.screen_candidates([j])
+        self.assertEqual(kept, [])
+        self.assertEqual(counts["role_out_of_scope"], 1)
+
+    def test_group_head_ecommerce_is_manual(self):
+        j = job("Group Head eCommerce & Retail Media (mensch)",
+                "Group strategy, retail media, marketplace sales, marketing.",
+                source="Adzuna", remote=None,
+                location="Berlin, Deutschland")
+        kept, _, _ = d.screen_candidates([j])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["review_only"])
+
+    def test_plural_marketplaces_are_not_false_out_of_scope(self):
+        j = job("Senior Manager Marketplaces (all genders)",
+                "Coordinate eBay and Amazon seller processes, pricing and "
+                "catalogue operations.",
+                source="Adzuna", remote=None,
+                location="Germany")
+        kept, counts, _ = d.screen_candidates([j])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["review_only"])
+        self.assertEqual(counts.get("role_out_of_scope", 0), 0)
+
+    def test_tiktok_shop_manager_gets_manual_review(self):
+        j = job("Junior TikTok Shop Manager",
+                "Own product listings and TikTok Shop catalogue operations.",
+                source="Adzuna", remote=None,
+                location="Berlin, Deutschland")
+        kept, _, _ = d.screen_candidates([j])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["review_only"])
+
+    def test_non_adzuna_full_description_still_ai_candidate(self):
+        j = job("Marketplace Operations Specialist",
+                "Manage catalogues and product pricing; no specialist requirement.",
+                source="Himalayas")
+        kept, _, _ = d.screen_candidates([j])
+        self.assertEqual(len(kept), 1)
+        self.assertFalse(kept[0]["review_only"])
+
     def test_regular_ops_remains_candidate(self):
         kept, _, _ = d.screen_candidates([
             job("Marketplace Operations Specialist",
