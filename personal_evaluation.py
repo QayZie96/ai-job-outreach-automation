@@ -167,6 +167,26 @@ def classify(result, job):
             else:
                 eligibility = "ineligible"
                 result["main_gap_or_uncertainty"] = "Himalayas country restrictions exclude Greece"
+    # Defensive postcheck: Gemini can misread a sentence-wide "all a plus"
+    # as making an optional language a hard requirement. If optional German
+    # alone drove an ineligible result, downgrade to manual review rather than
+    # create a false definitive rejection. Other genuine hard blockers remain.
+    description = re.sub(r"<[^>]+>", " ", str(job.get("job_description") or ""))
+    if (eligibility == "ineligible"
+            and job.get("precheck_eligibility") != "ineligible"
+            and re.search(
+                r"\bgerman\s+at\s+c1\s+or\s+above\b.{0,400}\bare\s+all\s+a\s+plus\b",
+                description, flags=re.I | re.S,
+            )
+            and re.search(
+                r"\bmandatory\b.{0,50}\b(?:german|c1)\b|\b(?:german|c1)\b.{0,50}\bmandatory\b",
+                str(result.get("main_gap_or_uncertainty") or ""), flags=re.I,
+            )):
+        eligibility = "uncertain"
+        result["main_gap_or_uncertainty"] = (
+            "German C1 is listed as an optional plus, not mandatory; "
+            "verify other role requirements and EU relocation eligibility."
+        )
     geo = str(job.get("location") or "").strip().lower()
     if job.get("source") == "Jobicy" and geo in {"usa", "united states", "us only", "united states only"}:
         eligibility = "ineligible"
