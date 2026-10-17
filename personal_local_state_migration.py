@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -136,9 +136,10 @@ def _cache_rows(conn):
 
 
 def _copy_database(source, target):
-    with closing(_source_connection(source)) as conn:
-        if conn is None:
-            raise FileNotFoundError("Production cache database missing")
+    conn = _source_connection(source)
+    if conn is None:
+        raise FileNotFoundError("Production cache database missing")
+    with closing(conn):
         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise ValueError("Production cache failed integrity check")
         with closing(sqlite3.connect(target)) as dst:
@@ -157,7 +158,8 @@ def _prepare_cache(production, experiment, release, scratch):
         collisions = 0
         unresolved = set()
         for label, path in (("experiment", experiment), ("release", release)):
-            with closing(_source_connection(path / CACHE)) as conn:
+            source_conn = _source_connection(path / CACHE)
+            with (closing(source_conn) if source_conn is not None else nullcontext(None)) as conn:
                 if conn and conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError(f"{label} cache failed integrity check")
                 rows = _cache_rows(conn)
