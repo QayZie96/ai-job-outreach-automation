@@ -114,6 +114,70 @@ class StateMigrationTests(unittest.TestCase):
             self.run_migration(apply=True)
         self.assertFalse((self.release / m.HISTORY).exists())
 
+    def test_opt_in_preserves_documented_ai_review_without_human_status_change(self):
+        prod_path = self.production / m.HISTORY
+        exp_path = self.experiment / m.HISTORY
+        p = json.loads(prod_path.read_text(encoding="utf-8"))
+        e = json.loads(exp_path.read_text(encoding="utf-8"))
+        p[self.a]["review_status"] = "pending"
+        e[self.a]["review_status"] = "pending"
+        p[self.a]["ai_judged"] = True
+        p[self.a]["ai_judged_at"] = "2026-10-16T10:00:00Z"
+        e[self.a]["ai_judged"] = False
+        e[self.a]["ai_judged_at"] = None
+        prod_path.write_text(json.dumps(p), encoding="utf-8")
+        exp_path.write_text(json.dumps(e), encoding="utf-8")
+
+        strict = self.run_migration()
+        self.assertEqual(strict["history_decision_conflicts_total"], 1)
+        self.assertEqual(strict["history_conflicts_by_reason"]["ai_judged"], 1)
+        report = self.run_migration(reconcile_ai_judged=True)
+        self.assertEqual(report["history_decision_conflicts_total"], 0)
+        self.assertEqual(report["ai_judgments_reconciled"], 1)
+        self.assertEqual(report["history_union"], 2)
+        self.assertEqual(report["history_conflicts_by_reason"]["review_status"], 0)
+        applied = self.run_migration(
+            apply=True, reconcile_ai_judged=True,
+            backup_dir=self.release.parent / "ai-backup",
+        )
+        self.assertTrue(applied["release_written"])
+        merged = json.loads((self.release / m.HISTORY).read_text(encoding="utf-8"))
+        self.assertTrue(merged[self.a]["ai_judged"])
+        self.assertEqual(merged[self.a]["ai_judged_at"], "2026-10-16T10:00:00Z")
+        self.assertEqual(merged[self.a]["review_status"], "pending")
+        self.assertEqual(merged[self.a]["last_seen"], "2026-10-17T10:00:00Z")
+
+    def test_opt_in_never_overrides_human_review_status(self):
+        p = self.experiment / m.HISTORY
+        rows = json.loads(p.read_text(encoding="utf-8"))
+        rows[self.a]["review_status"] = "pending"
+        rows[self.a]["ai_judged"] = False
+        p.write_text(json.dumps(rows), encoding="utf-8")
+        original = self.production / m.HISTORY
+        production_rows = json.loads(original.read_text(encoding="utf-8"))
+        production_rows[self.a]["ai_judged"] = True
+        production_rows[self.a]["ai_judged_at"] = "2026-10-16T10:00:00Z"
+        original.write_text(json.dumps(production_rows), encoding="utf-8")
+        report = self.run_migration(reconcile_ai_judged=True)
+        self.assertEqual(report["history_conflicts_by_reason"]["review_status"], 1)
+        self.assertEqual(report["ai_judgments_reconciled"], 0)
+        with self.assertRaisesRegex(ValueError, "conflicting human decisions"):
+            self.run_migration(apply=True, reconcile_ai_judged=True)
+
+    def test_opt_in_requires_timestamp_proving_ai_was_reviewed(self):
+        p = self.production / m.HISTORY
+        e = self.experiment / m.HISTORY
+        prod = json.loads(p.read_text(encoding="utf-8"))
+        exp = json.loads(e.read_text(encoding="utf-8"))
+        prod[self.a]["ai_judged"] = True
+        prod[self.a]["ai_judged_at"] = None
+        exp[self.a]["ai_judged"] = False
+        p.write_text(json.dumps(prod), encoding="utf-8")
+        e.write_text(json.dumps(exp), encoding="utf-8")
+        report = self.run_migration(reconcile_ai_judged=True)
+        self.assertEqual(report["history_conflicts_by_reason"]["ai_judged"], 1)
+        self.assertEqual(report["ai_judgments_reconciled"], 0)
+
     def test_identical_timestamp_and_different_cache_blocks(self):
         with closing(sqlite3.connect(self.experiment / m.CACHE)) as db, db:
             db.execute(
