@@ -43,28 +43,43 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result["extended_only"]["incremental_unique"], 1)
         self.assertEqual(result["total_unique"], 2)
 
-    def test_current_eu_remote_exclusion_flagged_for_relocation_review(self):
+    def test_eu_remote_placement_is_uncertain_and_reviewable(self):
         target = job()
         rows, surviving, _, _, flags, _ = audit.count_outcomes([target])
-        self.assertEqual(rows[0]["screen_outcome"], "geography_excluded")
-        self.assertEqual(len(surviving), 0)
-        self.assertEqual(len(flags), 1)
+        self.assertEqual(len(surviving), 1)
+        self.assertEqual(surviving[0]["precheck_eligibility"], "uncertain")
+        self.assertEqual(len(flags), 0)
 
-    def test_himalayas_german_country_allowlist_flagged_for_relocation(self):
+    def test_himalayas_eu_country_allowlist_is_review_only_not_eligible(self):
         target = job(location="Germany")
         target["location_restrictions"] = ["DE"]
         rows, surviving, _, _, flags, _ = audit.count_outcomes([target])
-        self.assertEqual(rows[0]["screen_outcome"], "geography_excluded")
-        self.assertEqual(len(flags), 1)
+        self.assertEqual(len(surviving), 1)
+        self.assertEqual(surviving[0]["precheck_eligibility"], "uncertain")
+        self.assertEqual(len(flags), 0)
 
-    @unittest.expectedFailure
-    def test_undesired_not_hiring_in_greece_positive_match(self):
-        # Expected failure documents a real flaw in the unchanged screener.
+    def test_explicit_not_hiring_in_greece_is_not_eligible(self):
+        # Explicit country exclusions override accidental positive substring matches.
         target = job(location="Unknown")
         target["job_description"] = ("We are not hiring in Greece. "
                                      "Coordinate marketplace supplier and catalogue operations.")
         status, reason = ray.preliminary_eligibility(target)
         self.assertNotEqual(status, "eligible", reason)
+
+    def test_eu_relocation_does_not_become_strong_match(self):
+        from personal_evaluation import classify
+        target = job(location="Germany")
+        target["location_restrictions"] = ["DE"]
+        target["precheck_eligibility"] = "uncertain"
+        target["precheck_reason"] = "EU-country location restriction; relocation eligibility unverified"
+        assessment = {
+            "eligibility": "eligible", "fit_score": 93,
+            "matched_evidence": ["Catalog operations"], "posting_evidence": ["Product data"],
+            "mandatory_requirements": [], "main_gap_or_uncertainty": "", "reason": "Match",
+        }
+        classified = classify(assessment, target)
+        self.assertEqual(classified["eligibility"], "uncertain")
+        self.assertEqual(classified["decision"], "Review")
 
     def test_invalid_host_blocks_provider_before_network(self):
         http = audit.AuditHTTP(session=FakeSession([]), sleep=0)
