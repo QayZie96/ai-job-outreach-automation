@@ -80,7 +80,7 @@ def _setup(service, spreadsheet_id):
     ).execute()
     existing = {item["properties"]["title"]: item["properties"]
                 for item in metadata.get("sheets", [])}
-    required = ["Evaluations", "Run Summary", "Pending AI", *VIEW_FORMULAS]
+    required = ["Evaluations", "Run Summary", "Pending AI", "Manual Review", *VIEW_FORMULAS]
     additions = [{"addSheet": {"properties": {
         "title": title, "gridProperties": {"rowCount": 1000, "columnCount": 27}
     }}} for title in required if title not in existing]
@@ -94,8 +94,11 @@ def _setup(service, spreadsheet_id):
         existing = {item["properties"]["title"]: item["properties"]
                     for item in metadata.get("sheets", [])}
     values = sheets_api.values()
-    for tab, header in (("Evaluations", SHEET_HEADERS), ("Run Summary", RUN_HEADERS)):
-        last = "AA" if tab == "Evaluations" else "N"
+    for tab, header, last in (
+        ("Evaluations", SHEET_HEADERS, "AA"),
+        ("Run Summary", RUN_HEADERS, "N"),
+        ("Manual Review", MANUAL_HEADERS, "R"),
+    ):
         response = values.get(spreadsheetId=spreadsheet_id,
                               range=f"'{tab}'!A1:{last}1").execute()
         rows = response.get("values", [])
@@ -214,6 +217,83 @@ def _sheet_row(job, existing=None):
     return [out.get(key, "") for key in SHEET_HEADERS]
 
 
+# Separate from Gemini evaluations. Human review-only leads are never assigned
+# fabricated AI scores/decisions. Review Status and Notes belong to the user.
+MANUAL_HEADERS = [
+    "Vacancy ID", "Company", "Job Title", "Location", "Work Arrangement",
+    "Eligibility", "Deterministic Priority", "Why Manual Review", "Geography Reason",
+    "Source", "Source Query", "Job URL", "Posted", "First Seen", "Last Seen",
+    "AI Status", "Review Status", "Notes",
+]
+
+def _manual_review_row(job, existing=None, *, today=None):
+    """Stable, idempotent manual triage row preserving human edits."""
+    if not job.get("review_only") or not job.get("job_url"):
+        raise ValueError("Manual Review accepts only review-only jobs with URLs")
+    now = today or datetime.now(timezone.utc).date().isoformat()
+    old = dict(zip(MANUAL_HEADERS, list(existing or [])))
+    reason = str(job.get("precheck_reason") or "")
+    return [
+        old.get("Vacancy ID") or _vacancy_id(job["job_url"]),
+        job.get("company_name", ""), job.get("job_title", ""), job.get("location", ""),
+        ("EU relocation review" if "relocation" in reason.lower()
+         else "Remote" if job.get("remote") else "On-site/hybrid/unspecified"),
+        job.get("precheck_eligibility", "uncertain"),
+        job.get("priority", ""), job.get("role_evidence_reason", ""), reason,
+        job.get("source", ""), job.get("source_query", ""),
+        job["job_url"], job.get("created_at", ""),
+        old.get("First Seen") or now, now,
+        "Not AI evaluated — manual triage",
+        old.get("Review Status") or "New",
+        old.get("Notes") or "",
+    ]
+
+
+def _write_manual_review(service, spreadsheet_id, jobs):
+    """Append/update a dedicated, durable manual-only queue by canonical job URL.
+
+    Never clears stale jobs: history and human review choices survive future runs.
+    Never writes to Evaluations or changes AI judgments.
+    """
+    values = service.spreadsheets().values()
+    old_rows = values.get(
+        spreadsheetId=spreadsheet_id, range="'Manual Review'!A2:R",
+    ).execute().get("values", [])
+    url_idx = MANUAL_HEADERS.index("Job URL")
+    existing = {r[url_idx]: (n, r) for n, r in enumerate(old_rows, start=2)
+                if len(r) > url_idx and r[url_idx]}
+    pending_add, pending_update = [], []
+    processed = set()
+    for job in jobs:
+        url = job.get("job_url", "")
+        if not job.get("review_only") or not url or url in processed:
+            continue
+        processed.add(url)
+        prior = existing.get(url)
+        row = _manual_review_row(job, prior[1] if prior else None)
+        if prior:
+            padded = list(prior[1]) + [""] * max(0, len(MANUAL_HEADERS) - len(prior[1]))
+            if row != padded:
+                pending_update.append({
+                    "range": f"'Manual Review'!A{prior[0]}:R{prior[0]}",
+                    "values": [row],
+                })
+        else:
+            pending_add.append(row)
+    if pending_update:
+        values.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": "RAW", "data": pending_update},
+        ).execute()
+    if pending_add:
+        values.append(
+            spreadsheetId=spreadsheet_id, range="'Manual Review'!A:R",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+            body={"values": pending_add},
+        ).execute()
+    return {"manual_added": len(pending_add), "manual_updated": len(pending_update)}
+
+
 def _extend_evaluations_table(service, spreadsheet_id, required_end):
     """Expand the native table after values.append adds new vacancies.
 
@@ -254,7 +334,7 @@ def _extend_evaluations_table(service, spreadsheet_id, required_end):
             return
 
 
-def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats):
+def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats, *, manual_jobs=None):
     spreadsheet_id = verify_spreadsheet_destination()
     service = _service()
     _setup(service, spreadsheet_id)
@@ -343,4 +423,5 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats)
     values.append(spreadsheetId=spreadsheet_id, range="'Run Summary'!A:N",
                   valueInputOption="RAW", insertDataOption="INSERT_ROWS",
                   body={"values": summary_rows}).execute()
-    return {"added": len(pending_add), "updated": len(pending_update)}
+    manual_stats = _write_manual_review(service, spreadsheet_id, manual_jobs or [])
+    return {"added": len(pending_add), "updated": len(pending_update), **manual_stats}
