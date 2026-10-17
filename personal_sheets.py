@@ -37,7 +37,7 @@ VIEW_QUERIES = {
     "New Leads": "Col8 = 'Untriaged' and Col12 <> 'Dismissed' order by Col7 desc",
     "Apply First": "(Col8 = 'P1' or Col8 = 'P2') and Col12 <> 'Dismissed' order by Col9 asc",
     "Strong Matches": "Col10 = 'Strong Match' and Col12 <> 'Dismissed'",
-    "Review Queue": "Col10 = 'Review' and Col12 <> 'Dismissed'",
+    "Review Queue": "(Col10 = 'Review' or (Col10 = 'Manual Review' and Col8 = 'Untriaged')) and Col12 <> 'Dismissed'",
 }
 VIEW_TITLE_FORMULA = (
     '=IF(OR(A2="",N2=""),"",HYPERLINK(N2,'
@@ -53,6 +53,9 @@ def _view_formulas(where):
     }
 
 VIEW_FORMULAS = {name: _view_formulas(where) for name, where in VIEW_QUERIES.items()}
+# Only exact legacy formula values may be upgraded in place; user-authored
+# formulas remain protected by _setup's fail-closed check.
+OLD_REVIEW_QUEUE_FORMULAS = _view_formulas("Col10 = 'Review' and Col12 <> 'Dismissed'")
 
 # Hard safety guard for this experimental branch only. Remove deliberately at
 # the separately reviewed promotion point; never write to the live master.
@@ -122,7 +125,9 @@ def _setup(service, spreadsheet_id):
     ).execute()
     existing = {item["properties"]["title"]: item["properties"]
                 for item in metadata.get("sheets", [])}
-    required = ["Evaluations", "Run Summary", "Pending AI", "Manual Review", *VIEW_FORMULAS]
+    # Manual Review remains an untouched historical archive if it exists.
+    # Newly created workbooks should have one authoritative vacancy table.
+    required = ["Evaluations", "Run Summary", "Pending AI", *VIEW_FORMULAS]
     additions = [{"addSheet": {"properties": {
         "title": title, "gridProperties": {"rowCount": 1000, "columnCount": 27}
     }}} for title in required if title not in existing]
@@ -139,7 +144,6 @@ def _setup(service, spreadsheet_id):
     for tab, header, last in (
         ("Evaluations", SHEET_HEADERS, "AA"),
         ("Run Summary", RUN_HEADERS, "N"),
-        ("Manual Review", MANUAL_HEADERS, "R"),
     ):
         response = values.get(spreadsheetId=spreadsheet_id,
                               range=f"'{tab}'!A1:{last}1").execute()
@@ -163,8 +167,10 @@ def _setup(service, spreadsheet_id):
                              range=f"'{tab}'!{addr}",
                              valueRenderOption="FORMULA").execute().get("values", [])
             if got and got[0] and got[0][0] != formula:
-                raise ValueError(f"{tab}!{addr} has an unexpected formula; refusing write")
-            if not got:
+                if (tab != "Review Queue" or
+                        got[0][0] != OLD_REVIEW_QUEUE_FORMULAS[addr]):
+                    raise ValueError(f"{tab}!{addr} has an unexpected formula; refusing write")
+            if not got or not got[0] or not got[0][0] or got[0][0] != formula:
                 values.update(spreadsheetId=spreadsheet_id, range=f"'{tab}'!{addr}",
                               valueInputOption="USER_ENTERED",
                               body={"values": [[formula]]}).execute()
@@ -259,8 +265,9 @@ def _sheet_row(job, existing=None):
     return [out.get(key, "") for key in SHEET_HEADERS]
 
 
-# Separate from Gemini evaluations. Human review-only leads are never assigned
-# fabricated AI scores/decisions. Review Status and Notes belong to the user.
+# Archived Manual Review schema. The old tab is read-only after migration.
+# Manual-only vacancies now live in Evaluations, without fabricated AI scores.
+# Review Status and Notes always belong to the user.
 MANUAL_HEADERS = [
     "Vacancy ID", "Company", "Job Title", "Location", "Work Arrangement",
     "Eligibility", "Deterministic Priority", "Why Manual Review", "Geography Reason",
@@ -336,6 +343,164 @@ def _write_manual_review(service, spreadsheet_id, jobs):
     return {"manual_added": len(pending_add), "manual_updated": len(pending_update)}
 
 
+def _manual_to_evaluation_row(job, *, backlog=False, today=None):
+    """One unified non-AI row; no fabricated score, AI date or requirements.
+
+    Caller must not invoke on previously AI-assessed jobs. Existing human
+    records are protected by URL-level insertion-only behavior.
+    """
+    url = str(job.get("job_url") or "").strip()
+    if not url or not job.get("review_only") or "assessment" in job:
+        raise ValueError("Expected an unassessed manual-review job with URL")
+    now = today or datetime.now(timezone.utc).date().isoformat()
+    prior = job.get("_archive") or {}
+    reason = str(job.get("precheck_reason") or prior.get("Geography Reason") or "")
+    rank = job.get("priority")
+    why = job.get("role_evidence_reason") or prior.get("Why Manual Review") or ""
+    priority_text = (f"Deterministic screening priority {rank}; {why}"
+                     if rank not in ("", None) else why)
+    vals = {
+        "Vacancy ID": prior.get("Vacancy ID") or _vacancy_id(url),
+        "Company Name": job.get("company_name", ""),
+        "Job Title": job.get("job_title", ""),
+        "Location": job.get("location", ""),
+        "Work Arrangement": (prior.get("Work Arrangement") or
+                             ("EU relocation review" if "relocation" in reason.lower()
+                              else "Remote" if job.get("remote") else "On-site/hybrid/unspecified")),
+        "Advertised Salary": job.get("salary", ""),
+        "AI Fit Score": "",
+        "Application Priority": "Backlog" if backlog else "Untriaged",
+        "Priority Rank": "",
+        "Decision": "Manual Review",
+        "Eligibility": job.get("precheck_eligibility") or prior.get("Eligibility") or "uncertain",
+        "Review Status": prior.get("Review Status") or job.get("review_status") or "New",
+        "Recommended Next Action": ("Historical lead — verify vacancy is still open"
+                                    if backlog else
+                                    "Verify eligibility and requirements; decide whether to apply"),
+        "Job URL": url,
+        "Posted": job.get("created_at", ""),
+        "Checked": prior.get("Last Seen") or now,
+        "Source": job.get("source", ""),
+        "Source Job ID": job.get("source_job_id", ""),
+        "Matched Evidence": "",
+        "Mandatory Requirements": "",
+        "Main Gap or Uncertainty": "",
+        "Reason": priority_text,
+        "Notes": prior.get("Notes") or job.get("notes") or "",
+        "Geographic Finding": reason,
+        "Verification State": "Not AI evaluated — manual verification required",
+        "Human Review Rationale": priority_text,
+        "AI Reviewed At": "",
+    }
+    return [vals.get(key, "") for key in SHEET_HEADERS]
+
+
+def _write_evaluations_manual(service, spreadsheet_id, jobs, *, backlog=False):
+    """Insert-only unified manual leads by canonical URL, preserving scored rows.
+
+    Writes the same Evaluations table as Gemini output. Repeated runs never
+    clobber scores, human changes, or notes. No Manual Review tab mutation.
+    """
+    from personal_discovery import canonical_url
+    values = service.spreadsheets().values()
+    old_rows = values.get(spreadsheetId=spreadsheet_id,
+                          range="'Evaluations'!A2:AA").execute().get("values", [])
+    url_idx = SHEET_HEADERS.index("Job URL")
+    known = {canonical_url(row[url_idx]) for row in old_rows
+             if len(row) > url_idx and canonical_url(row[url_idx])}
+    new_rows = []
+    for job in jobs:
+        url = canonical_url(job.get("job_url"))
+        if not url or url in known or not job.get("review_only"):
+            continue
+        known.add(url)
+        new_rows.append(_manual_to_evaluation_row(job, backlog=backlog))
+    if not new_rows:
+        return {"manual_added": 0, "manual_updated": 0}
+    result = values.append(
+        spreadsheetId=spreadsheet_id, range="'Evaluations'!A:AA",
+        valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+        body={"values": new_rows},
+    ).execute()
+    changed = result.get("updates", {}).get("updatedRange", "")
+    match = re.search(r"!A([0-9]+)(?::|$)", changed)
+    if not match:
+        raise RuntimeError("Cannot verify appended manual rows for title hyperlinks")
+    first = int(match.group(1))
+    links = [{"range": f"'Evaluations'!C{first+i}",
+              "values": [[_job_title_formula(first+i, row[2])]]}
+             for i, row in enumerate(new_rows)]
+    values.batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"valueInputOption": "USER_ENTERED", "data": links},
+    ).execute()
+    _extend_evaluations_table(service, spreadsheet_id, first - 1 + len(new_rows))
+    return {"manual_added": len(new_rows), "manual_updated": 0}
+
+
+def _archived_manual_job(row):
+    """Convert a frozen historical manual row to a display-only backlog lead."""
+    old = dict(zip(MANUAL_HEADERS, row))
+    url = old.get("Job URL", "")
+    return {
+        "job_url": url, "review_only": True,
+        "company_name": old.get("Company", ""),
+        "job_title": old.get("Job Title", ""),
+        "location": old.get("Location", ""),
+        "precheck_eligibility": old.get("Eligibility") or "uncertain",
+        "precheck_reason": old.get("Geography Reason", ""),
+        "priority": old.get("Deterministic Priority", ""),
+        "role_evidence_reason": old.get("Why Manual Review", ""),
+        "source": old.get("Source", ""),
+        "source_query": old.get("Source Query", ""),
+        "created_at": old.get("Posted", ""),
+        "_archive": old,
+    }
+
+
+def migrate_manual_archive_to_evaluations(*, apply=False):
+    """Stage-only one-time consolidation; dry-run by default.
+
+    Never alters original archived Manual Review rows, existing Evaluations
+    rows, saved human decisions, Google production workbook or APIs.
+    """
+    spreadsheet_id = verify_spreadsheet_destination()
+    service = _service()
+    values = service.spreadsheets().values()
+    raw = values.get(spreadsheetId=spreadsheet_id,
+                     range="'Manual Review'!A1:R").execute().get("values", [])
+    if not raw or raw[0] != MANUAL_HEADERS:
+        raise ValueError("Manual Review header mismatch; refusing archive migration")
+    existing = values.get(spreadsheetId=spreadsheet_id,
+                          range="'Evaluations'!A1:AA").execute().get("values", [])
+    if not existing or existing[0] != SHEET_HEADERS:
+        raise ValueError("Evaluations header mismatch; refusing archive migration")
+    from personal_discovery import canonical_url
+    known = {canonical_url(r[SHEET_HEADERS.index("Job URL")]) for r in existing[1:]
+             if len(r) > SHEET_HEADERS.index("Job URL")}
+    jobs = [_archived_manual_job(r) for r in raw[1:]
+            if len(r) > MANUAL_HEADERS.index("Job URL")]
+    unique, candidates = set(), []
+    for job in jobs:
+        url = canonical_url(job["job_url"])
+        if url and url not in known and url not in unique:
+            unique.add(url)
+            candidates.append(job)
+    result = {
+        "mode": "apply" if apply else "dry_run",
+        "archive_count": len(jobs),
+        "already_in_evaluations": len(jobs) - len(candidates),
+        "backlog_to_add": len(candidates),
+        "existing_evaluations": len(existing) - 1,
+        "provider_calls": 0, "gemini_calls": 0,
+    }
+    if apply and candidates:
+        _setup(service, spreadsheet_id)  # protection and view migration
+        result.update(_write_evaluations_manual(service, spreadsheet_id,
+                                               candidates, backlog=True))
+    return result
+
+
 def _extend_evaluations_table(service, spreadsheet_id, required_end):
     """Expand the native table after values.append adds new vacancies.
 
@@ -377,10 +542,10 @@ def _extend_evaluations_table(service, spreadsheet_id, required_end):
 
 
 def publish_manual_only_from_report(report_path):
-    """Publish only deterministic review-only leads from an offline collection.
+    """Publish old unassessed candidates into unified Evaluations, once per URL.
 
-    No provider HTTP, Gemini, local history mutation, or Evaluations row update.
-    Existing Manual Review human notes/statuses are preserved by URL.
+    No provider HTTP, Gemini, or local history mutation. Existing scored rows
+    and human statuses are never overwritten.
     """
     import json
     from pathlib import Path
@@ -409,7 +574,7 @@ def publish_manual_only_from_report(report_path):
     ]
     service = _service()
     _setup(service, spreadsheet_id)
-    return _write_manual_review(service, spreadsheet_id, manual_jobs)
+    return _write_evaluations_manual(service, spreadsheet_id, manual_jobs)
 
 
 def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats, *, manual_jobs=None):
@@ -501,5 +666,5 @@ def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats,
     values.append(spreadsheetId=spreadsheet_id, range="'Run Summary'!A:N",
                   valueInputOption="RAW", insertDataOption="INSERT_ROWS",
                   body={"values": summary_rows}).execute()
-    manual_stats = _write_manual_review(service, spreadsheet_id, manual_jobs or [])
+    manual_stats = _write_evaluations_manual(service, spreadsheet_id, manual_jobs or [])
     return {"added": len(pending_add), "updated": len(pending_update), **manual_stats}
