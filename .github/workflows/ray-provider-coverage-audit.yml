@@ -1,4 +1,4 @@
-name: RAY staging publication — offline regression
+name: RAY stage duplicate prevention — regression
 
 on:
   push:
