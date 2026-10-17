@@ -394,10 +394,16 @@ def publish_manual_only_from_report(report_path):
     # Read-only reference; if unavailable, fail before any Sheet mutation.
     spreadsheet_id = verify_spreadsheet_destination()
     existing = read_existing_evaluations()["existing_urls"]
-    from personal_discovery import canonical_url
+    from personal_discovery import canonical_url, deduplicate, screen_candidates
+    # Frozen reports predate today's screening policies. Do not publish an old
+    # unsupported-language lead simply because it was once marked manual-only.
+    originally_manual = {canonical_url(item.get("job_url")) for item in jobs
+                         if item.get("review_only")}
+    current, _, _ = screen_candidates(deduplicate([dict(item) for item in jobs]))
     manual_jobs = [
-        item for item in jobs if item.get("review_only")
-        and canonical_url(item.get("job_url")) not in existing
+        item for item in current if item.get("review_only")
+        and item["job_url"] in originally_manual
+        and item["job_url"] not in existing
     ]
     service = _service()
     _setup(service, spreadsheet_id)
