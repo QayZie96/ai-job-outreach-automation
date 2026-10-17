@@ -151,7 +151,7 @@ class PostingLanguageTests(unittest.TestCase):
                                return_value={"existing_urls": set()}),
                   patch.object(sheets, "_service", return_value=object()),
                   patch.object(sheets, "_setup"),
-                  patch.object(sheets, "_write_manual_review", return_value={"added": 1}) as writer):
+                  patch.object(sheets, "_write_evaluations_manual", return_value={"added": 1}) as writer):
                 stats = sheets.publish_manual_only_from_report(path)
             self.assertEqual(stats["added"], 1)
             submitted = writer.call_args.args[2]
