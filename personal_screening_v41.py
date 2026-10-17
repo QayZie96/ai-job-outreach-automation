@@ -100,6 +100,33 @@ def calibrated_factors(title: str, description: str) -> dict:
                 "flags": [f"mandatory_{language.lower()}"], "priority_delta": 0,
                 "force_review": False, "promote_review": False}
 
+    # Explicit language-pair translation/localization roles require fluency in
+    # the target language. Avoid spending Gemini calls on "English to Armenian"
+    # or similar requirements unsupported by the user's English/Greek profile.
+    if re.search(
+        r"\\benglish\\s+(?:to|into|[-–>]\\s*to)\\s+(?:armenian|spanish|german|"
+        r"dutch|french|italian|portuguese|polish|russian|ukrainian|"
+        r"turkish|arabic|japanese|czech|korean|chinese|hindi)\\b",
+        tlow,
+    ):
+        return {"hard_exclusion": "mandatory_language",
+                "reason": "Translation/localization target language not in verified profile",
+                "flags": ["unsupported_translation_language"], "priority_delta": 0,
+                "force_review": False, "promote_review": False}
+
+    # Explicit specialist capabilities absent from the verified portfolio
+    # remain human-review leads; they are not discarded as unrelated.
+    if re.search(r"\\bsewing\\s+specialist\\b", tlow) and re.search(
+        r"\\bhands[- ]on\\s+experience\\s+with\\s+sewing\\b", low
+    ):
+        blockers.append("sewing_specialist_experience_unverified")
+    if re.search(r"\\bamazon\\s+marketplace\\s+manager\\b", tlow) and re.search(
+        r"\\bdeep\\s+understanding\\s+of\\s+amazon\\s+seller\\s+central\\b", low
+    ):
+        blockers.append("amazon_seller_central_expertise_unverified")
+    if re.search(r"\\b(?:senior|sr\\.?|director|head of|vp|vice president)\\b", tlow):
+        blockers.append("advanced_role_seniority_review")
+
     # Only explicit AI annotation/rating work, not AI implementation or automation.
     ai_annotation = bool(re.search(r"\b(?:train|training|evaluate|evaluation|rate|rating|label|annotat)"
                                    r".{0,35}\b(?:ai models?|language models?|llms?|model responses?|ai outputs?)\b|"
