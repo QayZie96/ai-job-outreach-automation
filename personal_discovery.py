@@ -623,6 +623,7 @@ OPERATIONAL_ACTIONS = (
 NON_ENGLISH_LANGUAGE = (
     "german", "french", "dutch", "spanish", "italian", "portuguese", "polish",
     "swedish", "danish", "norwegian", "finnish", "turkish", "arabic", "japanese",
+    "chinese", "mandarin", "korean", "hindi", "armenian",
 )
 EU_COUNTRIES = (
     "austria", "belgium", "bulgaria", "croatia", "cyprus", "czechia", "czech republic",
@@ -758,6 +759,42 @@ def mandatory_other_language(job):
     return None
 
 
+# Only explicit *job-location restrictions* can exclude a remote ad.
+# Company headquarters, client markets and travel locations are not hiring
+# boundaries. This logic deliberately favors false negatives over guessing.
+_NON_EU_HIRING_LOCATIONS = (
+    r"philippines|mexico|brazil|united states|usa|u\.s\.a\.|us|u\.s\.|"
+    r"canada|india|malaysia|australia|switzerland|united kingdom|uk"
+)
+
+
+def explicit_non_eu_remote_restriction(job, description):
+    """Find explicit non-EU work locations in remote adverts only."""
+    if not job.get("remote"):
+        return None
+    place = " ".join(str(job.get("location") or "").lower().split())
+    if re.search(r"\bremote\s*[-–]\s*(?:us|usa|united states)\b", place):
+        return "Remote-US-only location in provider metadata"
+    patterns = (
+        rf"\blocation\s*:\s*(?:remote\s*[-–]\s*)?(?:{_NON_EU_HIRING_LOCATIONS})"
+        rf"\s*(?:\((?:fully\s+)?remote\)|[-–]\s*remote)",
+        rf"\b(?:looking\s+for|seeking|hiring)\s+(?:[\w-]+\s+){{0,3}}"
+        rf"(?:{_NON_EU_HIRING_LOCATIONS})[- ]based\s+candidates?\b",
+        rf"\bwork\s+from\s+anywhere\s+in\s+(?:the\s+)?(?:{_NON_EU_HIRING_LOCATIONS})\b",
+        rf"\bthis\s+(?:role|position)\s+(?:is|will\s+be)\s+"
+        rf"(?:remote\s+(?:within|in\s+the\s+country\s+of)|"
+        rf"(?:remote\s*,?\s*and\s+)?based\s+in)\s+"
+        rf"(?:the\s+)?(?:{_NON_EU_HIRING_LOCATIONS})\b",
+        rf"\bnearshore\s*,?\s+based\s+in\s+"
+        rf"(?:{_NON_EU_HIRING_LOCATIONS})\s+or\s+(?:{_NON_EU_HIRING_LOCATIONS})\b",
+        rf"\byou\s+must\s+be\s+(?:located|based)\s+in\s+(?:the\s+)?"
+        rf"(?:{_NON_EU_HIRING_LOCATIONS})\b",
+    )
+    if any(re.search(pattern, description, re.I) for pattern in patterns):
+        return "Employer explicitly restricts remote hiring to non-EU location"
+    return None
+
+
 def preliminary_eligibility(job):
     # Only hard-reject when metadata explicitly rules out the user's location.
     # Ambiguous locations continue as Review candidates, not Strong Matches.
@@ -767,6 +804,9 @@ def preliminary_eligibility(job):
     # The employer's explicit negative geographic statement outranks a broad
     # source label, even if provider metadata also contains GR.
     desc = description_text(job)
+    non_eu_hiring = explicit_non_eu_remote_restriction(job, desc)
+    if non_eu_hiring:
+        return "ineligible", non_eu_hiring
     if re.search(
         r"\b(?:not|never|no longer)\s+(?:currently\s+)?(?:hiring|recruiting)\s+(?:in|from)\s+greece\b|"
         r"\bcurrently\s+(?:not|no longer)\s+(?:hiring|recruiting)\s+(?:in|from)\s+greece\b|"
