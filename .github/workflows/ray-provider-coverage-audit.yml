@@ -1,4 +1,4 @@
-name: RAY expanded staging calibration — offline regression
+name: RAY staging publication — offline regression
 
 on:
   push:
