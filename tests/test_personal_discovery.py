@@ -650,10 +650,40 @@ class Tests(unittest.TestCase):
         self.assertTrue({"operations", "ecommerce", "automation", "marketing", "analyst"}
                         <= set(d.HIMALAYAS_QUERIES))
         self.assertEqual(d.JOBICY_FILTERS, ((None, "europe"), (None, "anywhere")))
+        self.assertEqual(len(d.HIMALAYAS_EXTRA_QUERIES), 5)
+        self.assertEqual(sum(d.DEFAULT_LIMITS.values()), 25)
         with self.assertRaises(ValueError):
-            d.BudgetedHTTP({"Himalayas": 7})
+            d.BudgetedHTTP({"Himalayas": 18})
         with self.assertRaises(ValueError):
             d.BudgetedHTTP({"Adzuna": 1})
+
+    def test_expanded_himalayas_plan_stays_bounded_and_ordered(self):
+        session = FakeSession([FakeResponse(200, {"success": True, "jobs": []}) for _ in range(17)])
+        http = d.BudgetedHTTP({"Arbeitnow": 0, "Remotive": 0, "Adzuna": 0,
+                               "Himalayas": 17, "Jobicy": 0}, session)
+        jobs, stats, errors = d.collect(http)
+        self.assertEqual(jobs, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(http.calls["Himalayas"], 17)
+        requests = [c[1]["params"] for c in session.calls]
+        self.assertTrue(all(q["page"] == 1 for q in requests[:6]))
+        self.assertTrue(all(q["page"] == 2 for q in requests[6:12]))
+        self.assertEqual([q.get("q") for q in requests[12:]],
+                         list(d.HIMALAYAS_EXTRA_QUERIES))
+
+    def test_jobicy_cursor_pagination_requires_provider_token(self):
+        session = FakeSession([
+            FakeResponse(200, {"success": True, "jobs": [], "nextCursor": "OPAQUE"}),
+            FakeResponse(200, {"success": True, "jobs": [], "nextCursor": None}),
+            FakeResponse(200, {"success": True, "jobs": [], "hasMore": False}),
+        ])
+        http = d.BudgetedHTTP({"Arbeitnow": 0, "Remotive": 0, "Adzuna": 0,
+                               "Himalayas": 0, "Jobicy": 3}, session)
+        d.collect(http)
+        self.assertEqual(http.calls["Jobicy"], 3)
+        self.assertEqual(session.calls[2][1]["params"],
+                         {"count": 200, "geo": "europe", "cursor": "OPAQUE"})
+        self.assertTrue(all("cursor" not in x.get("parameters", {}) for x in http.request_log))
 
     def test_provider_queries_and_429_abort_only_rate_limited_provider(self):
         session = FakeSession([
