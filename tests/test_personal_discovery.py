@@ -330,9 +330,9 @@ class Tests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertTrue(d.target_role({**noise, "job_title": title}))
 
-    def test_geo_filter_requires_greece_for_country_restricted_remote(self):
+    def test_geo_filter_distinguishes_greece_remote_from_eu_relocation(self):
         j = {**JOB, "location": "Netherlands", "remote": True}
-        self.assertEqual(d.preliminary_eligibility(j)[0], "ineligible")
+        self.assertEqual(d.preliminary_eligibility(j)[0], "uncertain")
         j["location"] = "Europe"
         self.assertEqual(d.preliminary_eligibility(j)[0], "uncertain")
         j["location"] = "Anywhere"
