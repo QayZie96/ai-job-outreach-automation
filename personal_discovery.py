@@ -47,6 +47,14 @@ ADZUNA_DEFAULT_QUERIES = ("ecommerce", "operations")
 ADZUNA_MAX_PAGES_PER_QUERY = 2
 REMOTE_OK = "https://remoteok.com/api"
 WE_WORK_REMOTELY = "https://weworkremotely.com/remote-jobs.rss"
+# WWR publishes separate public RSS feeds; requesting the global URL three
+# times would only duplicate jobs. The two selected categories can expose
+# older postings beyond the global latest-jobs window.
+WWR_FEEDS = (
+    ("all", WE_WORK_REMOTELY),
+    ("product", "https://weworkremotely.com/categories/remote-product-jobs.rss"),
+    ("customer-support", "https://weworkremotely.com/categories/remote-customer-support-jobs.rss"),
+)
 REMOTEJOBS_ORG = "https://remotejobs.org/api/v1/jobs"
 REMOTEJOBS_QUERY = "operations"
 # All six Himalayas searches are intentionally broad *single-term* searches.
@@ -75,7 +83,7 @@ HARD_PROVIDER_LIMITS = dict(DEFAULT_LIMITS)
 # environment flags may later authorize a tiny, separately bounded pilot.
 HARD_PROVIDER_LIMITS.update({
     "Adzuna": 12, "Remote OK": 1,
-    "We Work Remotely": 1, "RemoteJobs.org": 2,
+    "We Work Remotely": 3, "RemoteJobs.org": 2,
 })
 TARGET_TERMS = (
     "operation", "e-commerce", "ecommerce", "marketplace", "catalog",
@@ -507,12 +515,18 @@ def collect(http):
         except (ProviderError, ValueError, KeyError, TypeError) as exc:
             errors.append(str(exc))
 
-    if http.limits.get("We Work Remotely", 0):
+    for category, feed_url in WWR_FEEDS:
+        if (http.calls["We Work Remotely"] >= http.limits.get("We Work Remotely", 0)
+                or "We Work Remotely" in http.blocked):
+            break
         try:
-            rss = http.get_text("We Work Remotely", WE_WORK_REMOTELY)
-            add("We Work Remotely", rss, normalize_wwr_rss, query="rss:all")
+            rss = http.get_text("We Work Remotely", feed_url)
+            add("We Work Remotely", rss, normalize_wwr_rss, query=f"rss:{category}")
         except (ProviderError, ValueError, KeyError, TypeError) as exc:
             errors.append(str(exc))
+            # Fail closed rather than retrying other categories after a bad
+            # response or block; this also protects the daily call ceiling.
+            break
 
     if http.limits.get("RemoteJobs.org", 0):
         offset = 0
@@ -1075,7 +1089,7 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
               "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 17, maximum=17),
               "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 3, maximum=3),
               "Remote OK": env_int("PERSONAL_MAX_REMOTE_OK_CALLS", 0, maximum=1),
-              "We Work Remotely": env_int("PERSONAL_MAX_WWR_CALLS", 0, maximum=1),
+              "We Work Remotely": env_int("PERSONAL_MAX_WWR_CALLS", 0, maximum=3),
               "RemoteJobs.org": env_int("PERSONAL_MAX_REMOTEJOBS_ORG_CALLS", 0, maximum=2)}
     max_ai = env_int("PERSONAL_MAX_GEMINI_CALLS", 5, maximum=10)
     if write_sheet and collect_only:
