@@ -1125,7 +1125,17 @@ if __name__ == "__main__":
     parser.add_argument("--collect-only", action="store_true", help="Skip Gemini and Sheets")
     parser.add_argument("--write-sheet", action="store_true", help="Append to NEW personal Sheet")
     parser.add_argument("--report", default="personal_run.json")
+    parser.add_argument("--publish-manual-report", metavar="JSON_PATH", default=None,
+                        help="Offline staging Sheet upsert of manual leads from collect-only report")
     args = parser.parse_args()
-    if not args.live:
-        parser.error("Pass --live to authorize bounded API calls (no scheduling)")
-    run(collect_only=args.collect_only, write_sheet=args.write_sheet, report_path=args.report)
+    if args.publish_manual_report:
+        if args.live or args.collect_only or args.write_sheet:
+            parser.error("--publish-manual-report cannot be combined with collection/AI options")
+        load_dotenv(BASE / ".env")
+        from personal_sheets import publish_manual_only_from_report
+        result = publish_manual_only_from_report(args.publish_manual_report)
+        print(f"Manual-only staging publication complete: {result}")
+    else:
+        if not args.live:
+            parser.error("Pass --live to authorize bounded API calls (no scheduling)")
+        run(collect_only=args.collect_only, write_sheet=args.write_sheet, report_path=args.report)
