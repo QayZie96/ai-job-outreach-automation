@@ -37,12 +37,16 @@ ADZUNA = "https://api.adzuna.com/v1/api/jobs/gb/search/1"
 # GR may also include worldwide postings; provider metadata is not eligibility proof.
 HIMALAYAS_QUERIES = (None, "operations", "ecommerce", "automation",
                      "marketing", "analyst")
+# Experimental coverage expansion: broad page 2 first, then selected
+# high-signal niche queries. No unlimited crawl of Himalayas' global feed.
+HIMALAYAS_EXTRA_QUERIES = ("catalogue", "product data", "pricing",
+                           "procurement", "implementation")
 # Query-by-geography instead of restrictive combinations such as
 # tag=operations+geo=europe; keep titles and full employer descriptions locally.
 JOBICY_FILTERS = ((None, "europe"), (None, "anywhere"))
 # Fixed hard ceilings per manual run, independently of .env values.
-DEFAULT_LIMITS = {"Arbeitnow": 2, "Remotive": 1, "Adzuna": 0,
-                  "Himalayas": 6, "Jobicy": 2}
+DEFAULT_LIMITS = {"Arbeitnow": 4, "Remotive": 1, "Adzuna": 0,
+                  "Himalayas": 17, "Jobicy": 3}
 HARD_PROVIDER_LIMITS = dict(DEFAULT_LIMITS)
 TARGET_TERMS = (
     "operation", "e-commerce", "ecommerce", "marketplace", "catalog",
@@ -293,24 +297,34 @@ def collect(http):
     except (ProviderError, KeyError, TypeError) as exc:
         errors.append(str(exc))
 
-    for query in HIMALAYAS_QUERIES:
+    # Exhaust a bounded and deliberately prioritized search plan: existing
+    # first pages, their second pages, then five niche page-1 searches.
+    hima_plan = (
+        [(q, 1) for q in HIMALAYAS_QUERIES]
+        + [(q, 2) for q in HIMALAYAS_QUERIES]
+        + [(q, 1) for q in HIMALAYAS_EXTRA_QUERIES]
+    )
+    for query, page in hima_plan:
         if (http.calls["Himalayas"] >= http.limits.get("Himalayas", 0)
                 or "Himalayas" in http.blocked):
             break
         try:
-            params = {"country": "GR", "sort": "recent", "page": 1}
+            params = {"country": "GR", "sort": "recent", "page": page}
             if query:
                 params["q"] = query
             payload = http.get_json("Himalayas", HIMALAYAS, params)
             if payload.get("success") is False:
                 raise ProviderError("Himalayas response indicates failure")
             add("Himalayas", payload.get("jobs") or [], normalize_himalayas,
-                query=f"GR:{query or 'all'}:p1")
+                query=f"GR:{query or 'all'}:p{page}")
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
             if "Himalayas" in http.blocked:
                 break
 
+    # Preserve the existing two Jobicy geography probes, then optionally
+    # traverse ONE more Europe page only if the API supplies a cursor.
+    europe_cursor = None
     for tag, geo in JOBICY_FILTERS:
         if (http.calls["Jobicy"] >= http.limits.get("Jobicy", 0)
                 or "Jobicy" in http.blocked):
@@ -323,11 +337,24 @@ def collect(http):
             if payload.get("success") is False:
                 raise ProviderError(f"Jobicy: {payload.get('error', 'API failed')}")
             add("Jobicy", payload.get("jobs") or [], normalize_jobicy,
-                query=f"geo:{geo}:all")
+                query=f"geo:{geo}:p1")
+            if geo == "europe" and isinstance(payload.get("nextCursor"), str):
+                europe_cursor = payload["nextCursor"] or None
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
             if "Jobicy" in http.blocked:
                 break
+    if (europe_cursor and "Jobicy" not in http.blocked
+            and http.calls["Jobicy"] < http.limits.get("Jobicy", 0)):
+        try:
+            payload = http.get_json("Jobicy", JOBICY, {
+                "count": 200, "geo": "europe", "cursor": europe_cursor})
+            if payload.get("success") is False:
+                raise ProviderError(f"Jobicy: {payload.get('error', 'API failed')}")
+            add("Jobicy", payload.get("jobs") or [], normalize_jobicy,
+                query="geo:europe:p2")
+        except (ProviderError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
     return jobs, stats, errors
 
 
@@ -804,11 +831,11 @@ def write_report(path, jobs, raw_stats, calls, errors, evaluation_stats):
 
 def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json", session=None):
     load_dotenv(BASE / ".env")
-    limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 2, maximum=2),
+    limits = {"Arbeitnow": env_int("PERSONAL_MAX_ARBEITNOW_CALLS", 4, maximum=4),
               "Remotive": env_int("PERSONAL_MAX_REMOTIVE_CALLS", 1, maximum=1),
               "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=0),
-              "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 6, maximum=6),
-              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 2, maximum=2)}
+              "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 17, maximum=17),
+              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 3, maximum=3)}
     max_ai = env_int("PERSONAL_MAX_GEMINI_CALLS", 5, maximum=10)
     if write_sheet and collect_only:
         raise ValueError("Cannot write unevaluated jobs to Sheets")
