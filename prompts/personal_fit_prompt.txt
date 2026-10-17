@@ -14,6 +14,11 @@ Eligibility first:
   that are unsupported by candidate evidence are eligibility concerns. Do not reject
   based solely on "senior", "manager", "degree", or unfamiliar tool names.
 - Distinguish must-have qualifications from preferred/nice-to-have requirements.
+  Scope matters: if a sentence lists several qualifications followed by
+  "are all a plus", treat every listed item (including language proficiency)
+  as OPTIONAL. Do not call optional C1 German mandatory.
+- A role can be geographically accessible but a weak professional fit. Keep
+  eligibility, jurisdiction and transferability separate from fit_score.
 - If geography, language, or a key requirement cannot be established, use "uncertain".
   Missing information is not evidence of satisfaction and should not trigger a low-fit reject.
 - If description_truncated is true, mark uncertain when omitted text might contain
