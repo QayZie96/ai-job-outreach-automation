@@ -103,15 +103,15 @@ class PostingLanguageTests(unittest.TestCase):
     def test_german_company_english_ad_stays_in_pipeline(self):
         kept, count, _ = d.screen_candidates([job(ENGLISH * 3)])
         self.assertEqual(len(kept), 1)
-        self.assertEqual(count["posting_language_excluded"], 0)
+        self.assertEqual(count.get("posting_language_excluded", 0), 0)
 
     def test_foreign_post_hard_excluded_and_audited(self):
         row = job(GERMAN * 3)
         audit = []
         kept, count, rej = d.screen_candidates([row], audit=audit)
         self.assertEqual(kept, [])
-        self.assertEqual(count["posting_language_excluded"], 1)
-        self.assertEqual(rej[("Adzuna", "posting_language")], 1)
+        self.assertEqual(count.get("posting_language_excluded", 0), 1)
+        self.assertEqual(rej.get("Adzuna:posting_language", 0), 1)
         self.assertEqual(audit[0]["screen_outcome"], "posting_language_excluded")
         self.assertIn("Posting language not supported: German",
                       audit[0]["eligibility_reason"])
@@ -120,12 +120,12 @@ class PostingLanguageTests(unittest.TestCase):
         row = job(GREEK * 4, source="Himalayas")
         kept, count, _ = d.screen_candidates([row])
         self.assertEqual(len(kept), 1)
-        self.assertEqual(count["posting_language_excluded"], 0)
+        self.assertEqual(count.get("posting_language_excluded", 0), 0)
 
     def test_mixed_or_unknown_stays_reviewable(self):
         kept, count, _ = d.screen_candidates([job(GERMAN + ENGLISH * 4)])
         self.assertEqual(len(kept), 1)
-        self.assertEqual(count["posting_language_excluded"], 0)
+        self.assertEqual(count.get("posting_language_excluded", 0), 0)
 
     def test_non_latin_unsupported_script_but_not_greek(self):
         arabic = ("نبحث عن شخص للعمل مع فريقنا في الشركة ونتطلع إلى التقديم "
