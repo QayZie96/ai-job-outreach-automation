@@ -705,7 +705,7 @@ class Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.BudgetedHTTP({"Himalayas": 18})
         with self.assertRaises(ValueError):
-            d.BudgetedHTTP({"Adzuna": 1})
+            d.BudgetedHTTP({"Adzuna": 13})
 
     def test_expanded_himalayas_plan_stays_bounded_and_ordered(self):
         session = FakeSession([FakeResponse(200, {"success": True, "jobs": []}) for _ in range(17)])
