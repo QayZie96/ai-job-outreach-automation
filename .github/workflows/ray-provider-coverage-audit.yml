@@ -1,4 +1,4 @@
-name: RAY optional feeds geography calibration — offline tests
+name: RAY optional feeds exclusion evidence — regression
 
 on:
   push:
