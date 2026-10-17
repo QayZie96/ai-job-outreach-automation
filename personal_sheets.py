@@ -369,6 +369,27 @@ def _extend_evaluations_table(service, spreadsheet_id, required_end):
             return
 
 
+def publish_manual_only_from_report(report_path):
+    """Publish only deterministic review-only leads from an offline collection.
+
+    No provider HTTP, Gemini, local history mutation, or Evaluations row update.
+    Existing Manual Review human notes/statuses are preserved by URL.
+    """
+    import json
+    from pathlib import Path
+    data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    jobs = data.get("evaluated_jobs")
+    if not isinstance(jobs, list) or not isinstance(data.get("evaluation"), dict):
+        raise ValueError("Not a Personal RAY collection report")
+    if any("assessment" in job for job in jobs):
+        raise ValueError("Refusing AI-assessment report for manual-only publication")
+    # Verify destination before initializing tabs or applying any user edits.
+    spreadsheet_id = verify_spreadsheet_destination()
+    service = _service()
+    _setup(service, spreadsheet_id)
+    return _write_manual_review(service, spreadsheet_id, jobs)
+
+
 def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats, *, manual_jobs=None):
     spreadsheet_id = verify_spreadsheet_destination()
     service = _service()
