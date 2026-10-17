@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 LANGUAGES = ("spanish", "german", "dutch", "french", "italian", "portuguese",
              "polish", "swedish", "danish", "norwegian", "finnish", "turkish",
-             "arabic", "japanese", "russian", "ukrainian", "czech")
+             "arabic", "japanese", "russian", "ukrainian", "czech",
+             "chinese", "mandarin", "korean", "hindi", "armenian")
 OPTIONAL = re.compile(r"\b(preferred|desirable|advantage|optional|a plus|nice.to.have|bonus|not required|a benefit)\b", re.I)
 DUTIES = re.compile(r"\b(manag|coordinat|automat|analys|analyz|report|data|workflow|"
                     r"catalog|inventory|customer|commerce|supplier|operations|project|"
@@ -55,6 +56,19 @@ def mandatory_language(title: str, description: str) -> str | None:
         if re.search(rf"\b{lang}(?:[- ]speaking|[- ]fluen\w*)\b|"
                      rf"\b{lang}\s+(?:fluency|required|c1|c2)\b", title):
             return language.title()
+        # A B2 requirement may appear as "speak English and German fluently".
+        # Merely mentioning Germany or German clients is insufficient evidence.
+        if (re.search(rf"\bwith\s+{lang}\b", title)
+                and re.search(
+                    rf"\b{lang}\b.{0,55}\b(?:fluent|fluently|b2|c1|c2|required|mandatory)\b|"
+                    rf"\bspeak\s+english\s+and\s+{lang}\s+fluently\b", desc)):
+            return language.title()
+        # "Native-level German" is mandatory language evidence, not a market label.
+        for native_match in re.finditer(rf"\bnative[- ]level\s+{lang}\b", desc):
+            # Optional/preferred/native-level desirable is not mandatory.
+            trailing = desc[native_match.end():native_match.end() + 75]
+            if not re.search(r"\b(?:a plus|preferred|optional|desirable|not required)\b", trailing):
+                return language.title()
         patterns = (
             rf"\b(?:fluent|fluency|native|c1|c2|business fluent|professional proficiency)"
             rf"\s+(?:in\s+)?{lang}\b",
@@ -99,6 +113,57 @@ def calibrated_factors(title: str, description: str) -> dict:
         return {"hard_exclusion": "mandatory_language", "reason": f"Advanced mandatory {language}",
                 "flags": [f"mandatory_{language.lower()}"], "priority_delta": 0,
                 "force_review": False, "promote_review": False}
+
+    # Explicit language-pair translation/localization roles require fluency in
+    # the target language. Avoid spending Gemini calls on "English to Armenian"
+    # or similar requirements unsupported by the user's English/Greek profile.
+    if re.search(
+        r"\benglish\s+(?:to|into)\s+(?:armenian|spanish|german|"
+        r"dutch|french|italian|portuguese|polish|russian|ukrainian|"
+        r"turkish|arabic|japanese|czech|korean|chinese|hindi)\b",
+        tlow,
+    ):
+        return {"hard_exclusion": "mandatory_language",
+                "reason": "Translation/localization target language not in verified profile",
+                "flags": ["unsupported_translation_language"], "priority_delta": 0,
+                "force_review": False, "promote_review": False}
+
+    # Explicit specialist capabilities absent from the verified portfolio
+    # remain human-review leads; they are not discarded as unrelated.
+    if re.search(r"\bsewing\s+specialist\b", tlow) and re.search(
+        r"\bhands[- ]on\s+experience\s+with\s+sewing\b", low
+    ):
+        blockers.append("sewing_specialist_experience_unverified")
+    if re.search(r"\bamazon\s+marketplace\s+manager\b", tlow) and re.search(
+        r"\bdeep\s+understanding\s+of\s+amazon\s+seller\s+central\b", low
+    ):
+        blockers.append("amazon_seller_central_expertise_unverified")
+    if re.search(r"\b(?:senior|sr\.?|director|head of|vp|vice president)\b", tlow):
+        blockers.append("advanced_role_seniority_review")
+
+    # Substantial non-English descriptions are *not* proof of mandatory
+    # language fluency, but are unsuitable for scarce automatic AI scoring.
+    # Use function words, not a job's geography, to request human review.
+    posting_words = re.findall(r"[a-zà-ÿ]+", low[:5000])
+    dutch_words = {
+        "voor", "zoeken", "iemand", "geen", "het", "een", "met", "van",
+        "die", "dat", "de", "er", "wordt", "ook", "maar", "zijn",
+        "moet", "als", "opdracht", "ervaring", "waar", "bij", "om",
+        "deze", "dit", "alle", "meer", "willen", "juist", "kunnen",
+        "naar", "ons", "over", "zorgen",
+    }
+    if (len(posting_words) >= 75
+            and sum(w in dutch_words for w in posting_words) / len(posting_words) >= 0.14):
+        blockers.append("predominantly_dutch_language_posting_review")
+    if (re.search(r"\b(?:creative\s*/\s*content|creative\s+content)\s+lead\b", tlow)
+            and re.search(r"\bcreative\s+direction\b|\bart\s+direction\b", low)):
+        blockers.append("creative_direction_specialism_unverified")
+    if (re.search(r"\bproduct\s+manager\b", tlow)
+            and re.search(
+                r"\b3\+?\s+years?\s+of\s+product\s+management\s+experience\b"
+                r".{0,45}\bin\s+a\s+product\s+company\b", low
+            )):
+        blockers.append("dedicated_product_manager_experience_unverified")
 
     # Only explicit AI annotation/rating work, not AI implementation or automation.
     ai_annotation = bool(re.search(r"\b(?:train|training|evaluate|evaluation|rate|rating|label|annotat)"
@@ -152,6 +217,12 @@ def calibrated_factors(title: str, description: str) -> dict:
                  r"amazon seller central|salesforce administrator)\s+(?:experience|expertise|knowledge)\b", low):
         blockers.append("named_platform_expertise_unverified")
 
+    # Senior individual-contributor titles can be interesting but rarely
+    # establish hireability from transferable operations evidence alone.
+    # Preserve them for human review, not automatic AI expenditure.
+    if re.search(r"\b(?:staff|principal)\b", tlow):
+        blockers.append("advanced_individual_contributor_seniority")
+
     if CORE.search(title): boosts += 18
     elif AUTOMATION.search(title): boosts += 14
     elif ADJACENT.search(title): boosts += 12
@@ -193,9 +264,16 @@ def replay_audit(audit_path: str | Path, report_path: str | Path | None = None,
         kind = "full" if url in full else "excerpt"
         counts["evidence_" + kind] += 1
         factors = calibrated_factors(title, desc)
+        from personal_posting_language import unsupported_posting_language
+        posting_language, language_evidence = unsupported_posting_language(desc)
         before = row["screen_outcome"]
         after = before
-        if factors["hard_exclusion"] and before in ("candidate", "review_only"):
+        reason = factors["reason"]
+        if posting_language and before in ("candidate", "review_only"):
+            after = "posting_language_excluded"
+            reason = (f"Posting language not supported: {posting_language}. "
+                      f"{language_evidence}")
+        elif factors["hard_exclusion"] and before in ("candidate", "review_only"):
             after = factors["hard_exclusion"] + "_excluded"
         elif before == "candidate" and factors["force_review"]:
             after = "review_only"
@@ -210,7 +288,7 @@ def replay_audit(audit_path: str | Path, report_path: str | Path | None = None,
                             "job_url": url, "old_outcome": before, "new_outcome": after,
                             "evidence": kind, "geography": row.get("eligibility", "not_checked"),
                             "rank": rank, "flags": ";".join(factors["flags"]),
-                            "reason": factors["reason"]})
+                            "reason": reason})
         counts["old"][before] = counts["old"].get(before, 0) + 1
         counts["new"][after] = counts["new"].get(after, 0) + 1
     if output_path:
