@@ -139,7 +139,7 @@ class CalibrationTests(unittest.TestCase):
              "vanuit één duidelijke commerciële en visuele lijn samenwerken. "
              "We zoeken daarom geen full-service bureau en ook niet iemand "
              "die alles zelf moet produceren. De creatieve opdracht begint "
-             "dus bij een bestaande strategie en creatieve direction. ") * 2,
+             "dus bij een bestaande creative direction and content strategy. ") * 2,
         )
         kept, _, _ = d.screen_candidates([row])
         self.assertEqual(len(kept), 1)
