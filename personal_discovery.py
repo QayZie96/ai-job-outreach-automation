@@ -55,6 +55,7 @@ WWR_FEEDS = (
     ("product", "https://weworkremotely.com/categories/remote-product-jobs.rss"),
     ("customer-support", "https://weworkremotely.com/categories/remote-customer-support-jobs.rss"),
 )
+WWR_ALLOWED_FEEDS = frozenset(url for _, url in WWR_FEEDS)
 REMOTEJOBS_ORG = "https://remotejobs.org/api/v1/jobs"
 REMOTEJOBS_QUERY = "operations"
 # All six Himalayas searches are intentionally broad *single-term* searches.
@@ -202,8 +203,8 @@ class BudgetedHTTP:
 
     def get_text(self, source, url):
         """One bounded public RSS request; 429 stops the provider, no retries."""
-        if source != "We Work Remotely" or url != WE_WORK_REMOTELY:
-            raise ProviderError("Only the approved We Work Remotely RSS endpoint is allowed")
+        if source != "We Work Remotely" or url not in WWR_ALLOWED_FEEDS:
+            raise ProviderError("Only the approved We Work Remotely RSS endpoints are allowed")
         if source in self.blocked:
             raise ProviderError(f"{source} stopped after rate limiting")
         if self.calls[source] >= self.limits.get(source, 0):
