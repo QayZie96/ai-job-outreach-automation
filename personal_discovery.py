@@ -1035,8 +1035,17 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
         job["discovery_status"] = "previously_seen" if old else "new"
         job["review_status"] = old.get("review_status", "pending")
         job["ai_judged"] = bool(old.get("ai_judged", False))
+    # The experiment's local history may be empty, but the copied staging
+    # Sheet already contains assessed Personal Ray vacancies. Never spend
+    # Gemini calls on these existing decisions or assessed URLs.
+    protected_sheet = {"existing_urls": set(), "scored_urls": set(), "terminal_urls": set()}
+    if write_sheet:
+        from personal_sheets import read_existing_evaluations
+        protected_sheet = read_existing_evaluations()  # read-only; fail closed if inaccessible
+    protected_urls = protected_sheet["scored_urls"] | protected_sheet["terminal_urls"]
     pending_candidates = [job for job in candidates
-                          if pending_for_review(history_before, job)]
+                          if pending_for_review(history_before, job)
+                          and job["job_url"] not in protected_urls]
     selection_limit = env_int("PERSONAL_MAX_AI_CANDIDATES", 40, minimum=1, maximum=100)
     scoring_pool = [job for job in pending_candidates if not job.get("review_only")]
     shortlist = prioritize_candidates(scoring_pool, selection_limit)
@@ -1063,6 +1072,12 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
                   "exploratory_review_only": len(pending_candidates) - len(scoring_pool),
                   "pending_for_review": len(pending_candidates),
                   "already_judged_skipped": len(candidates) - len(pending_candidates),
+                  "staging_scored_urls": len(protected_sheet["scored_urls"]),
+                  "staging_terminal_urls": len(protected_sheet["terminal_urls"]),
+                  "candidates_protected_from_repeat_ai": sum(
+                      j["job_url"] in protected_urls for j in candidates),
+                  "staging_known_candidate_urls": sum(
+                      j["job_url"] in protected_sheet["existing_urls"] for j in candidates),
                   "new_candidates": sum(j["discovery_status"] == "new" for j in pending_candidates),
                   "new_postings": sum(row["seen_before"] is False for row in audit),
                   "deferred_by_selection_limit": len(scoring_pool) - len(shortlist),
@@ -1085,7 +1100,9 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
         from personal_sheets import write_personal_results
         # Persist exploratory/manual-review-only vacancies separately from AI
         # Evaluations. Human Review Status and Notes are preserved by URL.
-        manual_jobs = [job for job in candidates if job.get("review_only")]
+        manual_jobs = [job for job in candidates
+                       if job.get("review_only")
+                       and job["job_url"] not in protected_sheet["existing_urls"]]
         sheet_stats = write_personal_results(
             completed, stats, http.calls, errors, eval_stats, manual_jobs=manual_jobs
         )
