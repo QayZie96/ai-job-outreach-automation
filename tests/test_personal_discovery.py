@@ -545,6 +545,8 @@ class Tests(unittest.TestCase):
                 result.execute.return_value = {"values": [sheet.SHEET_HEADERS]}
             elif kwargs["range"].startswith("'Run Summary'!"):
                 result.execute.return_value = {"values": [sheet.RUN_HEADERS]}
+            elif kwargs["range"].startswith("'Manual Review'!"):
+                result.execute.return_value = {"values": [sheet.MANUAL_HEADERS]}
             elif kwargs["range"].endswith("!A2") or kwargs["range"].endswith("!D2"):
                 result.execute.return_value = {"values": []}
             elif kwargs["range"].endswith("!C2"):
@@ -563,6 +565,54 @@ class Tests(unittest.TestCase):
                             for c in values.get.call_args_list
                             if c.kwargs["range"].endswith("!A2")))
         self.assertNotIn("'Evaluations'!1:1", ranges)
+
+    def test_manual_review_rows_unscored_and_human_fields_preserved(self):
+        base = {**JOB, "review_only": True, "priority": 47,
+                "precheck_eligibility": "uncertain",
+                "precheck_reason": "EU-country remote restriction; potential relocation requires verification",
+                "role_evidence_reason": "Transferable ecommerce operations"}
+        first = sheet._manual_review_row(base, today="2026-10-17")
+        h = sheet.MANUAL_HEADERS
+        self.assertEqual(first[h.index("AI Status")], "Not AI evaluated — manual triage")
+        self.assertEqual(first[h.index("Review Status")], "New")
+        self.assertEqual(first[h.index("Work Arrangement")], "EU relocation review")
+        self.assertTrue(first[0].startswith("RAY-"))
+        prior = list(first)
+        prior[h.index("Review Status")] = "Dismissed"
+        prior[h.index("Notes")] = "Employer requires local contract."
+        update = sheet._manual_review_row(
+            {**base, "priority": 31}, prior, today="2026-10-18")
+        self.assertEqual(update[h.index("First Seen")], "2026-10-17")
+        self.assertEqual(update[h.index("Last Seen")], "2026-10-18")
+        self.assertEqual(update[h.index("Review Status")], "Dismissed")
+        self.assertEqual(update[h.index("Notes")], "Employer requires local contract.")
+        self.assertEqual(update[h.index("Deterministic Priority")], 31)
+        self.assertEqual(update[h.index("Vacancy ID")], first[0])
+        with self.assertRaises(ValueError):
+            sheet._manual_review_row({**base, "review_only": False})
+
+    def test_manual_review_writer_deduplicates_and_never_overwrites_human_columns(self):
+        from unittest.mock import MagicMock
+        service = MagicMock()
+        values = service.spreadsheets.return_value.values.return_value
+        job = {**JOB, "review_only": True, "priority": 42,
+               "precheck_eligibility": "uncertain",
+               "precheck_reason": "EU relocation needed"}
+        first = sheet._manual_review_row(job, today="2026-10-15")
+        first[sheet.MANUAL_HEADERS.index("Notes")] = "Do not apply"
+        first[sheet.MANUAL_HEADERS.index("Review Status")] = "Dismissed"
+        values.get.return_value.execute.return_value = {"values": [first]}
+        result = sheet._write_manual_review(service, "TEST", [job, dict(job)])
+        self.assertEqual(result, {"manual_added": 0, "manual_updated": 1})
+        values.append.assert_not_called()
+        payload = values.batchUpdate.call_args.kwargs["body"]
+        self.assertEqual(payload["valueInputOption"], "RAW")
+        self.assertEqual(len(payload["data"]), 1)
+        row = payload["data"][0]["values"][0]
+        self.assertEqual(row[sheet.MANUAL_HEADERS.index("Notes")], "Do not apply")
+        self.assertEqual(row[sheet.MANUAL_HEADERS.index("Review Status")], "Dismissed")
+        self.assertEqual(row[sheet.MANUAL_HEADERS.index("AI Status")],
+                         "Not AI evaluated — manual triage")
 
     def test_human_first_sheet_mapping_and_stable_id(self):
         job = {**JOB, "assessment": ev.classify(dict(VALID), JOB)}
