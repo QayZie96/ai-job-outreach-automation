@@ -152,6 +152,12 @@ def calibrated_factors(title: str, description: str) -> dict:
                  r"amazon seller central|salesforce administrator)\s+(?:experience|expertise|knowledge)\b", low):
         blockers.append("named_platform_expertise_unverified")
 
+    # Senior individual-contributor titles can be interesting but rarely
+    # establish hireability from transferable operations evidence alone.
+    # Preserve them for human review, not automatic AI expenditure.
+    if re.search(r"\b(?:staff|principal)\b", tlow):
+        blockers.append("advanced_individual_contributor_seniority")
+
     if CORE.search(title): boosts += 18
     elif AUTOMATION.search(title): boosts += 14
     elif ADJACENT.search(title): boosts += 12
