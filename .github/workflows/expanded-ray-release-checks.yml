@@ -27,3 +27,14 @@ jobs:
           PERSONAL_MAX_REMOTEJOBS_ORG_CALLS: "1"
           PERSONAL_MAX_ADZUNA_CALLS: "0"
         run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  windows-state-migration:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Verify Windows SQLite file handles close
+        run: python -m unittest discover -s tests -p 'test_personal_local_state_migration.py' -v
