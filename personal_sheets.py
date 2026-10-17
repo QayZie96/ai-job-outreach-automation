@@ -397,13 +397,15 @@ def publish_manual_only_from_report(report_path):
     from personal_discovery import canonical_url, deduplicate, screen_candidates
     # Frozen reports predate today's screening policies. Do not publish an old
     # unsupported-language lead simply because it was once marked manual-only.
-    originally_manual = {canonical_url(item.get("job_url")) for item in jobs
-                         if item.get("review_only")}
     current, _, _ = screen_candidates(deduplicate([dict(item) for item in jobs]))
+    # Use CURRENT decisions only as a gate; preserve original human-facing
+    # fields, notes, ordering and metadata when publishing historical rows.
+    allowed_manual_urls = {item["job_url"] for item in current
+                           if item.get("review_only")}
     manual_jobs = [
-        item for item in current if item.get("review_only")
-        and item["job_url"] in originally_manual
-        and item["job_url"] not in existing
+        item for item in jobs if item.get("review_only")
+        and canonical_url(item.get("job_url")) in allowed_manual_urls
+        and canonical_url(item.get("job_url")) not in existing
     ]
     service = _service()
     _setup(service, spreadsheet_id)
