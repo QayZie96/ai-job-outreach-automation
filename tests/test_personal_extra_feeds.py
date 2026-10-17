@@ -69,12 +69,12 @@ class ExtraFeedTests(unittest.TestCase):
         self.assertEqual(d.DEFAULT_LIMITS["We Work Remotely"], 0)
         self.assertEqual(d.DEFAULT_LIMITS["RemoteJobs.org"], 0)
         self.assertEqual(d.HARD_PROVIDER_LIMITS["Remote OK"], 1)
-        self.assertEqual(d.HARD_PROVIDER_LIMITS["We Work Remotely"], 1)
+        self.assertEqual(d.HARD_PROVIDER_LIMITS["We Work Remotely"], 3)
         self.assertEqual(d.HARD_PROVIDER_LIMITS["RemoteJobs.org"], 2)
         with self.assertRaises(ValueError):
             d.BudgetedHTTP(limits(**{"Remote OK": 2}))
         with self.assertRaises(ValueError):
-            d.BudgetedHTTP(limits(**{"We Work Remotely": 2}))
+            d.BudgetedHTTP(limits(**{"We Work Remotely": 4}))
         with self.assertRaises(ValueError):
             d.BudgetedHTTP(limits(**{"RemoteJobs.org": 3}))
 
@@ -142,6 +142,56 @@ class ExtraFeedTests(unittest.TestCase):
         self.assertTrue(screened)
         self.assertTrue(all(j.get("precheck_eligibility") != "eligible" for j in screened))
         self.assertEqual(len(http.request_log), 3)
+
+    def test_three_distinct_wwr_feeds_are_bounded_and_deduplicated(self):
+        product = WWR_RSS.replace(
+            "Beta: Category Manager", "Gamma: Product Operations Specialist"
+        ).replace("beta-category-manager", "gamma-product-operations").replace(
+            "wwr-42", "wwr-43"
+        )
+        # The third feed deliberately repeats the global listing: source-level
+        # overlap must be removed before screening or evaluation.
+        session = FakeSession([
+            FakeResponse(text=WWR_RSS),
+            FakeResponse(text=product),
+            FakeResponse(text=WWR_RSS),
+        ])
+        http = d.BudgetedHTTP(limits(**{"We Work Remotely": 3}), session)
+        jobs, counts, errors = d.collect(http)
+        self.assertEqual(errors, [])
+        self.assertEqual(http.calls["We Work Remotely"], 3)
+        self.assertEqual(len(jobs), 3)
+        self.assertEqual(counts["We Work Remotely"], 3)
+        self.assertEqual(len(d.deduplicate(jobs)), 2)
+        self.assertEqual([u for u, _ in session.calls],
+                         [url for _, url in d.WWR_FEEDS])
+        self.assertEqual([j["source_query"] for j in jobs],
+                         ["rss:all", "rss:product", "rss:customer-support"])
+        self.assertEqual(len(http.request_log), 3)
+
+    def test_wwr_one_call_is_global_only(self):
+        session = FakeSession([FakeResponse(text=WWR_RSS)])
+        http = d.BudgetedHTTP(limits(**{"We Work Remotely": 1}), session)
+        jobs, _, errors = d.collect(http)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][0], d.WE_WORK_REMOTELY)
+
+    def test_wwr_429_prevents_remaining_categories(self):
+        session = FakeSession([FakeResponse(status=429)])
+        http = d.BudgetedHTTP(limits(**{"We Work Remotely": 3}), session)
+        _, _, errors = d.collect(http)
+        self.assertEqual(len(session.calls), 1)
+        self.assertIn("We Work Remotely", http.blocked)
+        self.assertTrue(any("429" in err for err in errors))
+
+    def test_wwr_malformed_rss_does_not_advance_categories(self):
+        session = FakeSession([FakeResponse(text="<rss><channel><item>")])
+        http = d.BudgetedHTTP(limits(**{"We Work Remotely": 3}), session)
+        _, _, errors = d.collect(http)
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(errors)
 
     def test_remotejobs_second_page_only_when_has_more(self):
         first = {**RJO_PAGE, "pagination": {"has_more": True}}
