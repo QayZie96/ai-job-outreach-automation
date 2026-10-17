@@ -150,6 +150,55 @@ class ExistingSheetProtectionTests(unittest.TestCase):
         svc.spreadsheets.return_value.values.return_value.batchUpdate.assert_not_called()
         svc.spreadsheets.return_value.values.return_value.append.assert_not_called()
 
+    def test_publish_offline_manual_report_without_ai_or_network(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        source = job(
+            "Senior Marketplace Operations Manager",
+            "Lead complex marketplace operations and vendor processes.",
+            review_only=True, precheck_reason="EU relocation required",
+            precheck_eligibility="uncertain",
+            priority=40,
+            role_evidence_reason="target role in title",
+        )
+        with TemporaryDirectory() as folder:
+            report = Path(folder) / "collected.json"
+            report.write_text(json.dumps({
+                "evaluation": {"ai_shortlist_count": 0},
+                "decisions": {},
+                "evaluated_jobs": [source],
+            }), encoding="utf-8")
+            mock_service = MagicMock()
+            with patch.object(sheet, "verify_spreadsheet_destination",
+                              return_value="ISOLATED-STAGING-ID"):
+                with patch.object(sheet, "_service", return_value=mock_service):
+                    with patch.object(sheet, "_setup") as setup:
+                        with patch.object(sheet, "_write_manual_review",
+                                          return_value={"manual_added": 1,
+                                                        "manual_updated": 0}) as writer:
+                            result = sheet.publish_manual_only_from_report(report)
+            self.assertEqual(result["manual_added"], 1)
+            setup.assert_called_once_with(mock_service, "ISOLATED-STAGING-ID")
+            writer.assert_called_once_with(
+                mock_service, "ISOLATED-STAGING-ID", [source]
+            )
+
+    def test_manual_only_rejects_assessment_report(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as folder:
+            report = Path(folder) / "assessed.json"
+            report.write_text(json.dumps({
+                "evaluation": {},
+                "evaluated_jobs": [dict(job("Ops"), assessment={"fit_score": 70})],
+            }), encoding="utf-8")
+            with patch.object(sheet, "_service") as service:
+                with self.assertRaisesRegex(ValueError, "Refusing AI-assessment report"):
+                    sheet.publish_manual_only_from_report(report)
+                service.assert_not_called()
+
     def test_failed_sheet_read_is_not_silently_swallowed(self):
         svc = MagicMock()
         svc.spreadsheets.return_value.values.return_value.get.return_value.execute.side_effect = PermissionError(
