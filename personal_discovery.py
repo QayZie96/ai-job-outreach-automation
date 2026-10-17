@@ -332,6 +332,10 @@ def normalize_original(source, raw):
                 "job_description": original.get("description"),
                 "job_url": original.get("redirect_url"),
                 "remote": None,
+                # Adzuna's API returns description EXCERPTS, not complete
+                # requirements. A job may look relevant but hide mandatory
+                # skills, language and right-to-work constraints.
+                "description_truncated": True,
                 "tags": [],
                 "job_types": [],
                 "created_at": iso_date(original.get("created")),
@@ -535,7 +539,8 @@ def collect(http):
 # prioritize evidence-rich roles for a bounded Gemini pass. Do NOT treat a
 # deterministic title/description keyword match as a final fit assessment.
 ROLE_TERMS = (
-    "ecommerce", "e-commerce", "e commerce", "marketplace", "catalog", "catalogue",
+    "ecommerce", "e-commerce", "e commerce", "marketplace", "marketplaces",
+    "tiktok shop", "catalog", "catalogue",
     "merchandis", "product data", "product information", "product content",
     "pricing", "inventory", "procurement", "purchasing", "supplier", "vendor",
     "fulfilment", "fulfillment", "order management", "order processing",
@@ -568,7 +573,7 @@ OUT_OF_SCOPE_TITLE = re.compile(
     r"tax manager|payroll|accountant|underwriter|auditor|accounts payable|finance specialist|"
     r"chief technology officer|chief operating officer|chief executive|"
     r"intern|internship|werkstudent|working student|stage\b|"
-    r"apprentice|praktikum)\b",
+    r"apprentice|apprenticeship|praktikum|ausbildung|auszubildend\w*|azubi)\b",
     re.IGNORECASE,
 )
 GENERIC_TITLE = re.compile(
@@ -933,13 +938,18 @@ def screen_candidates(jobs, audit=None):
         if role_score and factors["hard_exclusion"] == "mandatory_language":
             status, reason = "ineligible", factors["reason"] + " required by posting"
 
-        senior_executive = bool(re.search(r"\b(?:director|head of|vice president|vp|chief of staff)\b",
+        senior_executive = bool(re.search(r"\b(?:director|head of|group head|vice president|vp|chief of staff)\b",
                                           str(job.get("job_title") or ""), re.IGNORECASE))
         title = str(job.get("job_title") or "").lower()
         # Keep adjacent marketing/data/web opportunities visible; don't promote
         # them into an AI shortlist on generic company-description matches.
         transferable_only = _has_any(title, TRANSFERABLE_REVIEW_TITLES) and not _has_any(title, ROLE_TERMS)
-        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only or factors["force_review"]))
+        # Adzuna's public API returns snippets, never guaranteed complete
+        # descriptions. Do not pay Gemini to judge hidden qualifications.
+        excerpt_only = (job.get("source") == "Adzuna"
+                        and job.get("description_truncated", True))
+        exploratory = bool(role_score and (role_score < 45 or senior_executive or transferable_only
+                                           or factors["force_review"] or excerpt_only))
         outcome = "review_only" if exploratory else "candidate"
         if not role_score:
             counts["role_out_of_scope"] += 1
@@ -964,6 +974,9 @@ def screen_candidates(jobs, audit=None):
             if role_reason.startswith("transferable role"):
                 job["priority"] += 18
             job["fit_flags"] = list(factors["flags"])
+            if excerpt_only:
+                job["description_truncated"] = True
+                job["fit_flags"].append("adzuna_excerpt_requirements_unverified")
             survivors.append(job)
             counts["eligible" if status == "eligible" else "uncertain"] += 1
             if exploratory:
