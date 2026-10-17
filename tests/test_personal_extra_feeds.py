@@ -169,6 +169,16 @@ class ExtraFeedTests(unittest.TestCase):
                          ["rss:all", "rss:product", "rss:customer-support"])
         self.assertEqual(len(http.request_log), 3)
 
+    def test_wwr_rss_allowlist_rejects_unapproved_targets(self):
+        session = FakeSession([])
+        http = d.BudgetedHTTP(limits(**{"We Work Remotely": 3}), session)
+        with self.assertRaisesRegex(d.ProviderError, "approved"):
+            http.get_text("We Work Remotely", "https://untrusted.example/remote-jobs.rss")
+        with self.assertRaisesRegex(d.ProviderError, "approved"):
+            http.get_text("We Work Remotely", "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss")
+        self.assertEqual(len(session.calls), 0)
+        self.assertEqual(http.calls["We Work Remotely"], 0)
+
     def test_wwr_one_call_is_global_only(self):
         session = FakeSession([FakeResponse(text=WWR_RSS)])
         http = d.BudgetedHTTP(limits(**{"We Work Remotely": 1}), session)
