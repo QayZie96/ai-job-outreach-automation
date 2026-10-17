@@ -418,7 +418,7 @@ class ExistingSheetProtectionTests(unittest.TestCase):
                                   return_value={"existing_urls": set()}):
                     with patch.object(sheet, "_service", return_value=mock_service):
                         with patch.object(sheet, "_setup") as setup:
-                            with patch.object(sheet, "_write_manual_review",
+                            with patch.object(sheet, "_write_evaluations_manual",
                                               return_value={"manual_added": 1,
                                                             "manual_updated": 0}) as writer:
                                 result = sheet.publish_manual_only_from_report(report)
@@ -444,7 +444,7 @@ class ExistingSheetProtectionTests(unittest.TestCase):
                                   return_value={"existing_urls": {source["job_url"]}}):
                     with patch.object(sheet, "_service", return_value=MagicMock()):
                         with patch.object(sheet, "_setup"):
-                            with patch.object(sheet, "_write_manual_review",
+                            with patch.object(sheet, "_write_evaluations_manual",
                                               return_value={"manual_added": 0, "manual_updated": 0}) as writer:
                                 sheet.publish_manual_only_from_report(report)
             self.assertEqual(writer.call_args.args[2], [])
