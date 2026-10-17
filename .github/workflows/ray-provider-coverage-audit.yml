@@ -1,4 +1,4 @@
-name: RAY supported posting language — final staging safeguards
+name: RAY experimental branch regression checks
 
 on:
   push:
@@ -6,6 +6,8 @@ on:
       - experiment/ray-provider-coverage-audit
     paths:
       - .github/workflows/ray-provider-coverage-audit.yml
+      - personal_*.py
+      - tests/**
   workflow_dispatch:
 
 permissions:
