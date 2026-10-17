@@ -383,11 +383,18 @@ def publish_manual_only_from_report(report_path):
         raise ValueError("Not a Personal RAY collection report")
     if any("assessment" in job for job in jobs):
         raise ValueError("Refusing AI-assessment report for manual-only publication")
-    # Verify destination before initializing tabs or applying any user edits.
+    # Avoid duplicating entries already present in copied master Evaluations.
+    # Read-only reference; if unavailable, fail before any Sheet mutation.
     spreadsheet_id = verify_spreadsheet_destination()
+    existing = read_existing_evaluations()["existing_urls"]
+    from personal_discovery import canonical_url
+    manual_jobs = [
+        item for item in jobs if item.get("review_only")
+        and canonical_url(item.get("job_url")) not in existing
+    ]
     service = _service()
     _setup(service, spreadsheet_id)
-    return _write_manual_review(service, spreadsheet_id, jobs)
+    return _write_manual_review(service, spreadsheet_id, manual_jobs)
 
 
 def write_personal_results(jobs, provider_stats, http_calls, errors, eval_stats, *, manual_jobs=None):
