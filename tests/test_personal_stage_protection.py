@@ -280,6 +280,93 @@ class ExistingSheetProtectionTests(unittest.TestCase):
         self.assertEqual(metrics["candidates_protected_from_repeat_ai"], 1)
         self.assertEqual(metrics["staging_known_candidate_urls"], 1)
 
+    def test_evaluate_frozen_report_one_batch_and_no_existing_scored_jobs(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        evaluated = job(
+            "Marketplace Operations Specialist",
+            "Manage marketplace listings and supplier processes.",
+        )
+        new = job(
+            "Ecommerce Inventory Coordinator",
+            "Manage online inventory, vendor orders and Excel reporting.",
+            source_job_id="sample-2", job_url="https://example.com/jobs/sample-2",
+        )
+        manual = job(
+            "Senior Marketplace Operations Manager",
+            "Lead senior marketplace operations and supply chain.",
+            source_job_id="sample-3", job_url="https://example.com/jobs/sample-3",
+            review_only=True,
+        )
+        with TemporaryDirectory() as folder:
+            report = Path(folder) / "input.json"
+            report.write_text(json.dumps({
+                "evaluation": {"unique": 3, "prefiltered_candidates": 3},
+                "evaluated_jobs": [evaluated, new, manual],
+            }), encoding="utf-8")
+            with patch.dict("os.environ", {
+                "PERSONAL_GEMINI_FREE_TIER_CONFIRMED": "YES",
+            }):
+                with patch.object(sheet, "verify_spreadsheet_destination",
+                                  return_value="TEST-STAGING"):
+                    with patch.object(
+                        sheet, "read_existing_evaluations",
+                        return_value={
+                            "existing_urls": {evaluated["job_url"]},
+                            "scored_urls": {evaluated["job_url"]},
+                            "terminal_urls": set(),
+                        },
+                    ):
+                        with patch.object(d, "profile_text", return_value="Verified profile"):
+                            with patch.object(d, "PersonalCache"):
+                                with patch.object(d, "Evaluator") as evaluator:
+                                    evaluator.return_value.evaluate.return_value = (
+                                        [{**new, "assessment": {
+                                            "fit_score": 75, "decision": "Review",
+                                        }}],
+                                        {"gemini_calls": 1, "cache_hits": 0,
+                                         "failed_batches": 0},
+                                    )
+                                    with patch.object(
+                                        sheet, "write_personal_results",
+                                        return_value={"added": 1, "updated": 0,
+                                                      "manual_added": 0, "manual_updated": 0}
+                                    ) as writer:
+                                        results, stats = d.evaluate_saved_collection_report(report)
+            selected = evaluator.return_value.evaluate.call_args.args[0]
+            self.assertEqual([item["job_url"] for item in selected], [new["job_url"]])
+            self.assertEqual(evaluator.call_args.kwargs["max_calls"], 1)
+            self.assertEqual(stats["protected_from_repeat_ai"], 1)
+            self.assertEqual(stats["gemini_calls"], 1)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(writer.call_args.kwargs["manual_jobs"], [])
+            self.assertTrue((Path(folder) / "input_gemini_pilot.json").exists())
+
+    def test_gemini_saved_report_fails_closed_without_free_tier(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as folder:
+            p = Path(folder) / "unassessed.json"
+            p.write_text(json.dumps({
+                "evaluation": {}, "evaluated_jobs": [job("Marketplace Operations Specialist")]
+            }), encoding="utf-8")
+            with patch.dict("os.environ", {"PERSONAL_GEMINI_FREE_TIER_CONFIRMED": "NO"}):
+                with patch.object(sheet, "verify_spreadsheet_destination",
+                                  return_value="TEST-STAGING"):
+                    with patch.object(
+                        sheet, "read_existing_evaluations",
+                        return_value={
+                            "existing_urls": set(), "scored_urls": set(),
+                            "terminal_urls": set()
+                        }
+                    ):
+                        with patch.object(d, "Evaluator") as evaluator:
+                            with self.assertRaisesRegex(RuntimeError, "Free Tier"):
+                                d.evaluate_saved_collection_report(p)
+                            evaluator.assert_not_called()
+
     def test_failed_sheet_read_is_not_silently_swallowed(self):
         svc = MagicMock()
         svc.spreadsheets.return_value.values.return_value.get.return_value.execute.side_effect = PermissionError(
