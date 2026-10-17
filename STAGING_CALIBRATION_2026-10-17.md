@@ -26,6 +26,7 @@ The relevant frozen-audit headline remains **42 original candidates / 147 review
 ### Protect existing assessment history (especially on staging)
 
 - When `--write-sheet` is used, RAY first reads the destination staging `Evaluations` table **read-only**, before any Gemini expense.
+- Experimental Sheet writer explicitly refuses the production master Personal Ray spreadsheet ID, even if it was accidentally copied in `.env`.
 - Pre-existing AI-scored URLs and terminal human decisions are excluded from the AI shortlist. A legitimate score of 0 also counts as assessed. This avoids wasting Gemini calls on historical scores already present in the copied master spreadsheet when the experiment's local cache/history is empty.
 - The tool fails closed on Sheet read failure; this protects against expensive re-evaluation if staging access breaks.
 - Added report metrics `staging_scored_urls`, `staging_terminal_urls`, `candidates_protected_from_repeat_ai`, `staging_known_candidate_urls`.
@@ -58,5 +59,6 @@ Ensure the experimental `.env` sets `PERSONAL_GOOGLE_SHEET_ID=19VFagJwpHrW_d18FE
 
 - 120 passed: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/39027452675
 - 123 passed: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/39027744124
-- New stage publishing dedup rerun: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/39027861827 (verify final conclusion independently).
+- 124 passed with staging/manual queue dedup: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/39027861827
+- 125 passed with explicit hard-stop against the production Personal Ray Sheet: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/39027972388
 
