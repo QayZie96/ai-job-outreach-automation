@@ -32,3 +32,19 @@ Scope: user's authenticated `adzuna_probe/run_auth.json` and corresponding 50-ro
 2. Reconcile full original Personal RAY history/cache/human decisions and staging changes. Preserve production cron, `.env`, private profile, credentials, and snapshot before merge.
 3. Targeted offline/live post-merge smoke test with rollback. **User explicitly chooses to keep RemoteJobs.org=1** as a low-cost option even if one initial 50-row sample had no suitable candidate. Proposed daily budgets: Arbeitnow 4, Remotive 1, Himalayas 17, Jobicy 3, Remote OK 1, We Work Remotely 1, RemoteJobs.org 1, Adzuna 0 = 28 requests maximum. Do not alter production `.env`/schedule before release approval.
 4. The local legacy-collector test previously broke when optional providers were enabled in the user's `.env`. The fixture now explicitly zeroes all optional budgets; it is independent of local `.env` and needs only 2 canned HTTP responses. 62 environment-stressed regression tests and 144 complete offline tests passed: https://github.com/QayZie96/ai-job-outreach-automation/actions/runs/39032037325.
+
+
+## Adzuna-hosted saved-HTML PoC result (user-provided, 2026-10-17)
+
+Local user probe:
+`python adzuna_saved_page_probe.py --report adzuna_probe/run_auth.json --job-id 5930905647 --html adzuna_probe/5930905647.html`
+
+For The Orchard, `eCommerce Manager - GSA`:
+- API excerpt 500 characters.
+- Manually saved Adzuna `/details/5930905647` HTML 197,921 bytes.
+- Embedded `JobPosting` JSON-LD description 2,790 characters (~5.6x excerpt), title similarity 1.0; canonical identity checked.
+- No programmatic provider network calls, redirects, Gemini, or Sheet writes. This is **evidence of available text on that one page**, not proof the posting has a complete description and not authorization for automated harvesting.
+- Among the original 20 retained `de:ecommerce` results, 4 URLs used Adzuna `/details/...` format; the others used `/land/ad/...` and must not be presumed Adzuna-hosted pages after redirect.
+- Next evidence gate: manually save a **second distinct** /details listing (e.g. CBR eCommerce's AI Campaign Specialist, ID 5931419701) and compare description/requirements, ideally validate snippet substring and language requirements.
+- **Automated fetching remains disabled** unless Adzuna permissions and access policy for HTML detail retrieval are established. Its [API Terms](https://developer.adzuna.com/docs/terms_of_service) expressly forbid contacting third-party content sources from API results; don't follow redirects to publishers. Public API's separate page HTML access permission remains unverified. The Adzuna Intelligence offering advertises licensed full job detail.
+- No production changes or increase in Adzuna daily budget are approved from this single success.
