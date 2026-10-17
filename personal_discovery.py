@@ -562,6 +562,19 @@ def preliminary_eligibility(job):
     language = mandatory_other_language(job)
     if language:
         return "ineligible", f"Mandatory {language} language not in verified profile"
+    # The employer's explicit negative geographic statement outranks a broad
+    # source label, even if provider metadata also contains GR.
+    desc = description_text(job)
+    if re.search(
+        r"\b(?:not|never|no longer)\s+(?:currently\s+)?(?:hiring|recruiting)\s+(?:in|from)\s+greece\b|"
+        r"\bcurrently\s+(?:not|no longer)\s+(?:hiring|recruiting)\s+(?:in|from)\s+greece\b|"
+        r"\b(?:cannot|can't|do not|don't|unable to)\s+(?:hire|employ)\s+"
+        r"(?:candidates?\s+)?(?:in|from|based in)\s+greece\b|"
+        r"\bgreece\s+(?:is\s+)?not\s+(?:an?\s+)?(?:eligible|supported|approved)\s+(?:country|location)\b|"
+        r"\b(?:except|excluding)\s+greece\b",
+        desc,
+    ):
+        return "uncertain", "Explicit Greece hiring exclusion; investigate EU relocation separately"
     restrictions = job.get("location_restrictions") or []
     if job.get("source") == "Himalayas" and restrictions:
         regions = {str(x).upper() for x in restrictions}
@@ -573,16 +586,6 @@ def preliminary_eligibility(job):
         return "ineligible", "Explicit country allowlist excludes Greece and EU relocation"
     place = " ".join(str(job.get("location") or "").lower().split())
     if job.get("remote"):
-        desc = description_text(job)
-        # Explicit negative hiring statements must outrank keyword-based positive
-        # Greece matches. Retain as human review because EU relocation is in scope.
-        if re.search(
-            r"\b(?:not|never)\s+hiring\s+(?:in|from)\s+greece\b|"
-            r"\b(?:do not|don't|cannot|can't)\s+hire\s+(?:in|from)\s+greece\b|"
-            r"\bgreece\s+(?:is\s+)?not\s+(?:an?\s+)?(?:eligible|supported)\s+(?:country|location)\b",
-            desc,
-        ):
-            return "uncertain", "Explicit Greece hiring exclusion; investigate EU relocation separately"
         # Some remote aggregators label every role remote, even when the
         # employer explicitly requires office presence. EU hybrid relocation
         # is in scope; a country-restricted fully remote role is not.
