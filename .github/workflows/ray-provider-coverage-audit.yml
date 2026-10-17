@@ -1,4 +1,4 @@
-name: RAY staging guarded publication — regression
+name: RAY stage dedup manual publishing — regression
 
 on:
   push:
