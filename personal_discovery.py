@@ -23,6 +23,9 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from personal_evaluation import Evaluator, PersonalCache, profile_text
+from personal_extra_feeds import (
+    normalize_remote_ok, normalize_remotejobs, normalize_wwr_rss,
+)
 from personal_screening_v41 import calibrated_factors, update_history, load_history, pending_for_review
 
 BASE = Path(__file__).resolve().parent
@@ -31,6 +34,10 @@ REMOTIVE = "https://remotive.com/api/remote-jobs"
 HIMALAYAS = "https://himalayas.app/jobs/api/search"
 JOBICY = "https://jobicy.com/api/v2/remote-jobs"
 ADZUNA = "https://api.adzuna.com/v1/api/jobs/gb/search/1"
+REMOTE_OK = "https://remoteok.com/api"
+WE_WORK_REMOTELY = "https://weworkremotely.com/remote-jobs.rss"
+REMOTEJOBS_ORG = "https://remotejobs.org/api/v1/jobs"
+REMOTEJOBS_QUERY = "operations"
 # All six Himalayas searches are intentionally broad *single-term* searches.
 # This covers core and adjacent families without multiplying keyword variants.
 # The unfiltered GR query is intentionally first to catch unexpected job titles.
@@ -50,8 +57,12 @@ HIMALAYAS_GLOBAL_QUERIES = ("operations", "ecommerce")
 JOBICY_FILTERS = ((None, "europe"), (None, "anywhere"))
 # Fixed hard ceilings per manual run, independently of .env values.
 DEFAULT_LIMITS = {"Arbeitnow": 4, "Remotive": 1, "Adzuna": 0,
-                  "Himalayas": 17, "Jobicy": 3}
+                  "Himalayas": 17, "Jobicy": 3,
+                  "Remote OK": 0, "We Work Remotely": 0, "RemoteJobs.org": 0}
 HARD_PROVIDER_LIMITS = dict(DEFAULT_LIMITS)
+# These opt-in providers have ZERO default attempts. Only their specific
+# environment flags may later authorize a tiny, separately bounded pilot.
+HARD_PROVIDER_LIMITS.update({"Remote OK": 1, "We Work Remotely": 1, "RemoteJobs.org": 2})
 TARGET_TERMS = (
     "operation", "e-commerce", "ecommerce", "marketplace", "catalog",
     "merchandis", "category", "product data", "product information",
@@ -91,7 +102,7 @@ class BudgetedHTTP:
             raise ProviderError(f"{source} stopped after 429; no further requests")
         # Retries also spend budget. Record attempt provenance without credentials.
         # Do not repeat a query after the provider explicitly rate-limits it.
-        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry"}
+        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry", "limit", "offset"}
         safe_params = {k: v for k, v in (params or {}).items() if k in safe_keys}
         for attempt in range(2):
             if self.calls[source] >= self.limits.get(source, 0):
@@ -107,9 +118,14 @@ class BudgetedHTTP:
                 entry["outcome"] = response.status_code
                 if response.status_code == 200:
                     payload = response.json()
-                    if not isinstance(payload, dict):
+                    if not isinstance(payload, dict) and not (
+                        source == "Remote OK" and isinstance(payload, list)
+                    ):
                         raise ProviderError(f"{source}: invalid response schema")
-                    entry["returned"] = len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
+                    entry["returned"] = (
+                        len(payload) if isinstance(payload, list) else
+                        len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
+                    )
                     return payload
                 if response.status_code == 429:
                     self.blocked.add(source)
@@ -124,6 +140,38 @@ class BudgetedHTTP:
                 continue
             raise ProviderError(f"{source}: {error}")
         raise ProviderError(f"{source}: no valid response")
+
+
+    def get_text(self, source, url):
+        """One bounded public RSS request; 429 stops the provider, no retries."""
+        if source != "We Work Remotely" or url != WE_WORK_REMOTELY:
+            raise ProviderError("Only the approved We Work Remotely RSS endpoint is allowed")
+        if source in self.blocked:
+            raise ProviderError(f"{source} stopped after rate limiting")
+        if self.calls[source] >= self.limits.get(source, 0):
+            raise ProviderError(f"{source} API request budget exhausted")
+        self.calls[source] += 1
+        entry = {"source": source, "path": urlsplit(url).path,
+                 "parameters": {}, "attempt": 1, "outcome": "request_error"}
+        self.request_log.append(entry)
+        try:
+            response = self.session.get(
+                url, timeout=20, headers={"Accept": "application/rss+xml, application/xml"}
+            )
+            entry["outcome"] = response.status_code
+            if response.status_code == 429:
+                self.blocked.add(source)
+                raise ProviderError(f"{source} rate limited (429); no retry")
+            if response.status_code != 200:
+                if response.status_code in {401, 403}:
+                    self.blocked.add(source)
+                raise ProviderError(f"{source}: HTTP {response.status_code}")
+            rss = response.text
+            if not isinstance(rss, str) or len(rss) > 5_000_000:
+                raise ProviderError(f"{source}: invalid/oversized RSS response")
+            return rss
+        except requests.RequestException as exc:
+            raise ProviderError(f"{source}: {type(exc).__name__}: {exc}") from exc
 
 
 def canonical_url(value):
@@ -362,6 +410,41 @@ def collect(http):
                 query="geo:europe:p2")
         except (ProviderError, KeyError, TypeError) as exc:
             errors.append(str(exc))
+    # The following sources are deliberately opt-in, independently budgeted
+    # and reuse exactly the existing deterministic screen/dedup/history pipeline.
+    if http.limits.get("Remote OK", 0):
+        try:
+            payload = http.get_json("Remote OK", REMOTE_OK)
+            add("Remote OK", payload, normalize_remote_ok, query="unfiltered")
+        except (ProviderError, ValueError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+
+    if http.limits.get("We Work Remotely", 0):
+        try:
+            rss = http.get_text("We Work Remotely", WE_WORK_REMOTELY)
+            add("We Work Remotely", rss, normalize_wwr_rss, query="rss:all")
+        except (ProviderError, ValueError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+
+    if http.limits.get("RemoteJobs.org", 0):
+        offset = 0
+        while (http.calls["RemoteJobs.org"] < http.limits.get("RemoteJobs.org", 0)
+               and "RemoteJobs.org" not in http.blocked):
+            try:
+                payload = http.get_json("RemoteJobs.org", REMOTEJOBS_ORG, {
+                    "q": REMOTEJOBS_QUERY, "limit": 50, "offset": offset,
+                })
+                if not isinstance(payload.get("data"), list):
+                    raise ProviderError("RemoteJobs.org: missing data list")
+                add("RemoteJobs.org", payload, normalize_remotejobs,
+                    query=f"q:{REMOTEJOBS_QUERY}:offset:{offset}")
+                if not payload["data"] or not (payload.get("pagination") or {}).get("has_more"):
+                    break
+                offset += 50
+            except (ProviderError, ValueError, KeyError, TypeError) as exc:
+                errors.append(str(exc))
+                break
+
     return jobs, stats, errors
 
 
@@ -842,7 +925,10 @@ def run(*, collect_only=False, write_sheet=False, report_path="personal_run.json
               "Remotive": env_int("PERSONAL_MAX_REMOTIVE_CALLS", 1, maximum=1),
               "Adzuna": env_int("PERSONAL_MAX_ADZUNA_CALLS", 0, maximum=0),
               "Himalayas": env_int("PERSONAL_MAX_HIMALAYAS_CALLS", 17, maximum=17),
-              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 3, maximum=3)}
+              "Jobicy": env_int("PERSONAL_MAX_JOBICY_CALLS", 3, maximum=3),
+              "Remote OK": env_int("PERSONAL_MAX_REMOTE_OK_CALLS", 0, maximum=1),
+              "We Work Remotely": env_int("PERSONAL_MAX_WWR_CALLS", 0, maximum=1),
+              "RemoteJobs.org": env_int("PERSONAL_MAX_REMOTEJOBS_ORG_CALLS", 0, maximum=2)}
     max_ai = env_int("PERSONAL_MAX_GEMINI_CALLS", 5, maximum=10)
     if write_sheet and collect_only:
         raise ValueError("Cannot write unevaluated jobs to Sheets")
