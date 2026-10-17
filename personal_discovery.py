@@ -140,7 +140,8 @@ class BudgetedHTTP:
             raise ProviderError(f"{source} stopped after 429; no further requests")
         # Retries also spend budget. Record attempt provenance without credentials.
         # Do not repeat a query after the provider explicitly rate-limits it.
-        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry", "limit", "offset"}
+        safe_keys = {"q", "country", "sort", "page", "geo", "count", "tag", "industry", "limit", "offset",
+                     "what", "sort_by", "results_per_page"}
         safe_params = {k: v for k, v in (params or {}).items() if k in safe_keys}
         for attempt in range(2):
             if self.calls[source] >= self.limits.get(source, 0):
@@ -165,7 +166,7 @@ class BudgetedHTTP:
                         len(payload.get("jobs") or payload.get("data") or payload.get("results") or [])
                     )
                     return payload
-                if response.status_code == 429:
+                if response.status_code in {401, 403, 429}:
                     self.blocked.add(source)
                     raise ProviderError(f"{source} rate limited (429); no retry")
                 if response.status_code not in {500, 502, 503, 504}:
@@ -174,12 +175,12 @@ class BudgetedHTTP:
             except (requests.RequestException, ValueError) as exc:
                 # A network exception can embed a URL containing Adzuna's
                 # app_id/app_key. Never copy those secrets into audit logs.
-                detail = str(exc)
-                for secret_key in ("app_id", "app_key"):
-                    secret = (params or {}).get(secret_key)
-                    if secret:
-                        detail = detail.replace(str(secret), "[REDACTED]")
-                error = f"{type(exc).__name__}: {detail}"
+                # Exception messages can contain percent-encoded query
+                # credentials. Do not log their contents for Adzuna at all.
+                if source == "Adzuna":
+                    error = f"{type(exc).__name__}: request failed (credentials redacted)"
+                else:
+                    error = f"{type(exc).__name__}: {exc}"
             if attempt == 0 and self.calls[source] < self.limits.get(source, 0):
                 time.sleep(1)
                 continue
@@ -398,7 +399,10 @@ def collect(http):
             )
             pages = env_int("PERSONAL_ADZUNA_PAGES_PER_QUERY", 1, minimum=1,
                             maximum=ADZUNA_MAX_PAGES_PER_QUERY)
+            empty_pairs = set()
             for country, term, page in adzuna_search_plan(markets, terms, pages):
+                if (country, term) in empty_pairs:
+                    continue
                 if (http.calls["Adzuna"] >= http.limits["Adzuna"]
                         or "Adzuna" in http.blocked):
                     break
@@ -416,8 +420,8 @@ def collect(http):
                         lambda raw: normalize_original("Adzuna", raw),
                         query=f"market:{country}:what:{term}:p{page}")
                     if not rows:
-                        # Empty market/term combinations need no further pages.
-                        continue
+                        # Never request page 2 of an empty page 1 query.
+                        empty_pairs.add((country, term))
                 except (ProviderError, KeyError, TypeError, ValueError) as exc:
                     errors.append(str(exc))
                     if "Adzuna" in http.blocked:
