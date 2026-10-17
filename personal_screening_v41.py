@@ -62,6 +62,9 @@ def mandatory_language(title: str, description: str) -> str | None:
                     rf"\b{lang}\b.{0,55}\b(?:fluent|fluently|b2|c1|c2|required|mandatory)\b|"
                     rf"\bspeak\s+english\s+and\s+{lang}\s+fluently\b", desc)):
             return language.title()
+        # "Native-level German" is mandatory language evidence, not a market label.
+        if re.search(rf"\bnative[- ]level\s+{lang}\b", desc):
+            return language.title()
         patterns = (
             rf"\b(?:fluent|fluency|native|c1|c2|business fluent|professional proficiency)"
             rf"\s+(?:in\s+)?{lang}\b",
@@ -133,6 +136,30 @@ def calibrated_factors(title: str, description: str) -> dict:
         blockers.append("amazon_seller_central_expertise_unverified")
     if re.search(r"\b(?:senior|sr\.?|director|head of|vp|vice president)\b", tlow):
         blockers.append("advanced_role_seniority_review")
+
+    # Substantial non-English descriptions are *not* proof of mandatory
+    # language fluency, but are unsuitable for scarce automatic AI scoring.
+    # Use function words, not a job's geography, to request human review.
+    posting_words = re.findall(r"[a-zà-ÿ]+", low[:5000])
+    dutch_words = {
+        "voor", "zoeken", "iemand", "geen", "het", "een", "met", "van",
+        "die", "dat", "de", "er", "wordt", "ook", "maar", "zijn",
+        "moet", "als", "opdracht", "ervaring", "waar", "bij", "om",
+        "deze", "dit", "alle", "meer", "willen", "juist", "kunnen",
+        "naar", "ons", "over", "zorgen",
+    }
+    if (len(posting_words) >= 75
+            and sum(w in dutch_words for w in posting_words) / len(posting_words) >= 0.14):
+        blockers.append("predominantly_dutch_language_posting_review")
+    if (re.search(r"\b(?:creative\s*/\s*content|creative\s+content)\s+lead\b", tlow)
+            and re.search(r"\bcreative\s+direction\b|\bart\s+direction\b", low)):
+        blockers.append("creative_direction_specialism_unverified")
+    if (re.search(r"\bproduct\s+manager\b", tlow)
+            and re.search(
+                r"\b3\+?\s+years?\s+of\s+product\s+management\s+experience\b"
+                r".{0,45}\bin\s+a\s+product\s+company\b", low
+            )):
+        blockers.append("dedicated_product_manager_experience_unverified")
 
     # Only explicit AI annotation/rating work, not AI implementation or automation.
     ai_annotation = bool(re.search(r"\b(?:train|training|evaluate|evaluation|rate|rating|label|annotat)"
