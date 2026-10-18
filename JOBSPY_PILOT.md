@@ -24,12 +24,15 @@ instead of the branch-creation command. Keep the production checkout on its exis
 ## Bounded public pilot
 
 ```powershell
-.\.venv\Scripts\python.exe jobspy_pilot.py --live --baseline-history "C:\Users\kwstas\Desktop\ai-automation-case-study\ray-personal-job-discovery\personal_discovery_history.local.json"
+.\.venv\Scripts\python.exe jobspy_pilot.py --live --baseline-history "C:\Users\kwstas\Desktop\ai-automation-case-study\ray-expanded-release\personal_discovery_history.local.json"
 ```
 
-The baseline file is **read only**. The pilot makes four bounded board searches:
-two Indeed Greece queries and two LinkedIn EU remote queries, requesting at most 12
-records each (48 raw records max). It makes no requests to Gemini by default and
+The baseline file is **read only**. The default queries are the four bounded
+Pilot #2 searches (Indeed `ecommerce` and `operations coordinator` in Greece;
+LinkedIn `product operations` and `commercial operations` in the EU, requesting
+remote results). Each invocation requests at most 12 records (48 raw records max).
+The LinkedIn remote request has **not** reliably produced remote-only records;
+`is_remote=False` is not proof that a role requires office attendance. It makes no requests to Gemini by default and
 does not fetch individual posting descriptions as extra HTTP calls. Do not use
 proxies, authentication, or anti-bot workarounds. Stop a platform after its first
 failed invocation. Actual underlying HTTP request counts are not exposed by JobSpy:
@@ -41,12 +44,18 @@ Live results stay under ignored `jobspy_state/`:
 - `jobspy_candidates.csv`, `jobspy_screening_audit.csv`
 - `jobspy_report.json`, and a **separate** local history file.
 
-All screening is the existing RAY deterministic `screen_candidates` function.
-No new AI scoring rules are applied. A missing description may still generate
-a manual lead, but cannot be submitted for AI until content is present.
+All role/language screening reuses existing RAY deterministic `screen_candidates`.
+The isolated pilot corrects the Greek-location geographic label for surviving roles:
+`eligible` means location-compatible **only**, not verified qualifications, language,
+remote status, or current vacancy activity. Original provider remote values remain
+unchanged. A missing description may still generate a manual lead, but cannot
+be submitted for AI until content is present.
 A site "remote" label is NOT proof of Greece hiring eligibility.
 Cross-board title/company/location similarities are flags for manual review,
-not silent duplicate deletion.
+not silent duplicate deletion. With a read-only RAY baseline, normalized
+company/title matches (including common gender-title suffixes) and direct
+employer-URL matches are also **possible** duplicate flags, not verified duplicates.
+Exact URL novelty does not prove a genuinely new vacancy.
 
 ## Optional pilot Sheet publication
 
