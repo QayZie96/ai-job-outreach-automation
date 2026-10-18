@@ -32,10 +32,10 @@ PILOT_SHEET_ID = "1pgfchhc27VaGLy3Z4DjYou1lHQ0j4VH6JQ7lwGSURr8"
 PRODUCTION_PERSONAL_SHEET_ID = "160oMgKCoAVnqaBVsPL624kwkGOOZ1Lw8n2bvhRkbitQ"
 SEARCHES = (
     # Each invocation is one board and one query, not a page-walking loop.
-    ("indeed", "ecommerce operations", "Greece", False),
-    ("indeed", "catalog coordinator", "Greece", False),
-    ("linkedin", "marketplace operations", "European Union", True),
-    ("linkedin", "implementation coordinator", "European Union", True),
+    ("indeed", "ecommerce", "Greece", False),
+    ("indeed", "operations coordinator", "Greece", False),
+    ("linkedin", "product operations", "European Union", True),
+    ("linkedin", "commercial operations", "European Union", True),
 )
 PER_SEARCH = 12
 MAX_RAW = 4 * PER_SEARCH
@@ -168,6 +168,54 @@ def clean_token(value):
     return " ".join(re.sub(r"[^\w ]", " ", text_value(value).casefold()).split())
 
 
+def comparable_title(value):
+    """Remove only standard trailing gender tags when comparing role titles."""
+    parts = clean_token(value).split()
+    if parts[-3:] in (["m", "w", "d"], ["m", "f", "d"], ["f", "m", "d"]):
+        parts = parts[:-3]
+    return " ".join(parts)
+
+
+def ray_match_signals(job, known_urls, ray_names):
+    """Flag possible cross-provider matches; never silently discard a job."""
+    if known_urls is None:
+        return {"possible_ray_match": None, "possible_ray_match_by_name": None,
+                "possible_ray_match_by_employer_url": None}
+    if job["job_url"] in known_urls:
+        return {"possible_ray_match": False, "possible_ray_match_by_name": False,
+                "possible_ray_match_by_employer_url": False}
+    name = (clean_token(job["company_name"]), comparable_title(job["job_title"]))
+    by_name = bool(all(name) and name in ray_names)
+    employer_url = canonical_url(job.get("employer_url"))
+    by_employer_url = bool(employer_url and employer_url in known_urls)
+    return {"possible_ray_match": by_name or by_employer_url,
+            "possible_ray_match_by_name": by_name,
+            "possible_ray_match_by_employer_url": by_employer_url}
+
+
+def screen_pilot(jobs, audit=None):
+    """Correct only confirmed Greek geography in the isolated JobSpy output."""
+    candidates, counts, rejected = screen_candidates(jobs, audit=audit)
+    audit_by_url = {row["job_url"]: row for row in audit} if audit is not None else {}
+    for job in candidates:
+        if (job["precheck_eligibility"] != "uncertain"
+                or job["precheck_reason"] != "EU location permits relocation review"
+                or not re.search(r"\b(?:greece|ελλάδα|ελλαδα)\b",
+                                 text_value(job["location"]).casefold())):
+            continue
+        job["precheck_eligibility"] = "eligible"
+        job["precheck_reason"] = "Work location in Greece; other requirements unverified"
+        job["priority"] += 16  # existing RAY eligible vs uncertain priority difference
+        counts["uncertain"] -= 1
+        counts["eligible"] = counts.get("eligible", 0) + 1
+        if job["job_url"] in audit_by_url:
+            row = audit_by_url[job["job_url"]]
+            row["eligibility"] = "eligible"
+            row["eligibility_reason"] = job["precheck_reason"]
+            row["priority"] = job["priority"]
+    return candidates, counts, rejected
+
+
 def possible_crossboard_duplicates(jobs):
     by_signature = defaultdict(list)
     for job in jobs:
@@ -294,13 +342,13 @@ def main(args):
             normalized.append(job)
     unique = deduplicate(normalized)
     audit = []
-    candidates, screen_counts, rejected = screen_candidates(unique, audit=audit)
+    candidates, screen_counts, rejected = screen_pilot(unique, audit=audit)
     own_history_file = STATE / ("jobspy_fixture_history.local.json" if args.fixture
                                 else "jobspy_discovery_history.local.json")
     own_before = load_history(own_history_file)
     ray_history = load_history(args.baseline_history) if args.baseline_history else {}
     known = {canonical_url(url) for url in ray_history} if args.baseline_history else None
-    ray_names = {(clean_token(r.get("company")), clean_token(r.get("title")))
+    ray_names = {(clean_token(r.get("company")), comparable_title(r.get("title")))
                  for r in ray_history.values() if isinstance(r, dict)}
     dupes = possible_crossboard_duplicates(unique)
     details = {}
@@ -310,10 +358,7 @@ def main(args):
             "seen_before": url in own_before,
             "known_in_ray": (url in known) if known is not None else None,
             "possible_duplicate": url in dupes,
-            "possible_ray_match": (
-                (clean_token(job["company_name"]), clean_token(job["job_title"])) in ray_names
-                and url not in known
-            ) if known is not None else None,
+            **ray_match_signals(job, known, ray_names),
         }
     for row in audit:
         row.update(details.get(row["job_url"], {}))
@@ -369,7 +414,11 @@ def main(args):
             sum(bool(d["known_in_ray"]) for d in details.values()) if known is not None else None
         ),
         "possible_ray_matches_company_title_only": (
-            sum(bool(d["possible_ray_match"]) for d in details.values()) if known is not None else None
+            sum(bool(d["possible_ray_match_by_name"]) for d in details.values()) if known is not None else None
+        ),
+        "possible_ray_matches_employer_url": (
+            sum(bool(d["possible_ray_match_by_employer_url"]) for d in details.values())
+            if known is not None else None
         ),
         "new_by_exact_url_vs_supplied_ray_history": (
             sum(not d["known_in_ray"] for d in details.values()) if args.baseline_history else None
