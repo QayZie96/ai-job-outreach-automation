@@ -22,6 +22,16 @@ class JobSpyPilotTests(unittest.TestCase):
         self.assertEqual(j["location"], "Athens, Greece")
         self.assertEqual(len(deduplicate([j, dict(j)])), 1)
 
+    def test_normalize_jobspy_location_and_legacy_location_fields(self):
+        base = {"site": "linkedin", "title": "Operations Coordinator",
+                "company": "Example", "job_url": "https://example.org/operations"}
+        jobspy = m.normalize({**base, "location": "Stockholm, Stockholm County, Sweden"})
+        self.assertEqual(jobspy["location"], "Stockholm, Stockholm County, Sweden")
+        legacy = m.normalize({**base, "city": "Athens", "country": "Greece"})
+        self.assertEqual(legacy["location"], "Athens, Greece")
+        unknown = m.normalize(base)
+        self.assertEqual(unknown["location"], "Unknown")
+
     def test_missing_description_does_not_become_eligibility_claim(self):
         j = m.normalize({"site": "indeed", "title": "Marketplace Operations",
                          "company": "Company", "city": "", "country": "",
