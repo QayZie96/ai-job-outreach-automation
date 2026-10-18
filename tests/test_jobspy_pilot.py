@@ -52,6 +52,65 @@ class JobSpyPilotTests(unittest.TestCase):
         self.assertEqual(dupes, {a["job_url"], b["job_url"]})
         self.assertEqual(len(deduplicate([a, b])), 2)
 
+    def test_pilot_2_search_terms_remain_bounded(self):
+        self.assertEqual(m.SEARCHES, (
+            ("indeed", "ecommerce", "Greece", False),
+            ("indeed", "operations coordinator", "Greece", False),
+            ("linkedin", "product operations", "European Union", True),
+            ("linkedin", "commercial operations", "European Union", True),
+        ))
+        self.assertEqual(m.MAX_RAW, 48)
+
+    def test_greek_work_location_updates_screen_and_audit_without_inventing_remote(self):
+        greece = m.normalize({
+            "site": "indeed", "title": "eCommerce Executive", "company": "Example",
+            "location": "Αθήνα, GRI, Greece", "is_remote": False,
+            "job_url": "https://example.org/greek-role",
+        })
+        foreign = m.normalize({
+            "site": "linkedin", "title": "Marketplace Operations Manager",
+            "company": "Other", "location": "Stockholm, Sweden", "is_remote": False,
+            "job_url": "https://example.org/sweden-role",
+        })
+        audit = []
+        candidates, counts, _ = m.screen_pilot([greece, foreign], audit=audit)
+        local = next(j for j in candidates if j["job_url"] == greece["job_url"])
+        outside = next(j for j in candidates if j["job_url"] == foreign["job_url"])
+        self.assertEqual(local["precheck_eligibility"], "eligible")
+        self.assertIn("other requirements unverified", local["precheck_reason"])
+        self.assertFalse(local["remote"])
+        self.assertEqual(outside["precheck_eligibility"], "uncertain")
+        self.assertEqual(counts["eligible"], 1)
+        self.assertEqual(counts["uncertain"], 1)
+        local_audit = next(r for r in audit if r["job_url"] == greece["job_url"])
+        self.assertEqual(local_audit["eligibility"], "eligible")
+        self.assertEqual(local_audit["priority"], local["priority"])
+
+    def test_ray_cross_provider_match_signals_do_not_delete_or_overclaim(self):
+        base = {"site": "indeed", "company": "Example Co",
+                "title": "Catalog Operations Specialist (m/w/d)",
+                "job_url": "https://gr.indeed.com/viewjob?jk=abc"}
+        known = {"https://jobs.example.com/abc"}
+        by_name = {(m.clean_token("Example Co"),
+                    m.comparable_title("Catalog Operations Specialist"))}
+        name_match = m.normalize(base)
+        signals = m.ray_match_signals(name_match, known, by_name)
+        self.assertTrue(signals["possible_ray_match"])
+        self.assertTrue(signals["possible_ray_match_by_name"])
+        self.assertFalse(signals["possible_ray_match_by_employer_url"])
+        url_match = m.normalize({**base, "company": "Unrelated Recruiter",
+                                "title": "Different role",
+                                "job_url_direct": "https://jobs.example.com/abc"})
+        signals = m.ray_match_signals(url_match, known, by_name)
+        self.assertTrue(signals["possible_ray_match_by_employer_url"])
+        self.assertFalse(signals["possible_ray_match_by_name"])
+        unrelated = m.normalize({**base, "company": "Unrelated Recruiter",
+                                 "title": "Different role"})
+        self.assertFalse(m.ray_match_signals(unrelated, known, by_name)["possible_ray_match"])
+        self.assertIsNone(m.ray_match_signals(unrelated, None, by_name)["possible_ray_match"])
+        direct = m.normalize({**base, "job_url": "https://jobs.example.com/abc"})
+        self.assertFalse(m.ray_match_signals(direct, known, by_name)["possible_ray_match"])
+
     def test_bounded_scraping_arguments(self):
         calls = []
         class Frame:
