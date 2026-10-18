@@ -82,7 +82,7 @@ def normalize(row, *, query="fixture"):
     url = canonical_url(row.get("job_url"))
     if not url or not text_value(row.get("title")) or not text_value(row.get("company")):
         return None
-    place = ", ".join(dict.fromkeys(
+    place = text_value(row.get("location")) or ", ".join(dict.fromkeys(
         x for x in (text_value(row.get("city")), text_value(row.get("state")),
                     text_value(row.get("country"))) if x
     )) or "Unknown"
